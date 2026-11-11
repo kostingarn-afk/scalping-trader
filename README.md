@@ -109,8 +109,23 @@ export T_INVEST_TOKEN="t.xxxxxxxx"
 export T_INVEST_SANDBOX=true
 ```
 
-Sandbox-токен действует только против `sandbox-invest-public-api.tinkoff.ru`; prod-токен с
-`T_INVEST_SANDBOX=true` получит ошибку авторизации. `.env` в репозиторий не добавляется.
+WSL не наследует переменные Windows: если токен задан через `SetEnvironmentVariable(..., "User")`,
+внутри WSL2 его не видно и `mvn`/`spring-boot:run` из-под WSL получат пустой `tinkoff.token`.
+Проброс — через `WSLENV` (флаги `/p`, `/l` не нужны: они только для путей и списков):
+
+```powershell
+# Windows PowerShell — один раз, User scope; действует при старте WSL из Windows
+[Environment]::SetEnvironmentVariable("WSLENV", "T_INVEST_TOKEN:T_INVEST_SANDBOX", "User")
+```
+
+Альтернатива — `export` в `~/.bashrc` внутри WSL (дублирует секрет в домашнем каталоге WSL).
+
+Sandbox-токен действует только против `sandbox-invest-public-api.tinkoff.ru:443` — этот адрес зашит
+в `java-sdk-core:1.8` (`config.properties`: `ru.tinkoff.piapi.core.sandbox.target`; там же
+`ru.tinkoff.piapi.core.api.target` — prod-контур), переопределять его не нужно. Документация T-Bank
+приводит новый домен `sandbox-invest-public-api.tbank.ru:443`; оба хоста принимают один и тот же
+sandbox-токен. Prod-токен с `T_INVEST_SANDBOX=true` получит ошибку авторизации.
+`.env` в репозиторий не добавляется.
 
 ### Сборка (после реализации привязок SDK)
 ```bash

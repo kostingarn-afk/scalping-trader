@@ -107,6 +107,10 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 - `T_INVEST_TOKEN` — сырой токен T-Invest (`t.…`) **без** префикса `Bearer`: SDK (`InvestApi.addAuthHeader`) добавляет
   `Bearer ` сам, иначе заголовок станет `Bearer Bearer …` и вернётся `40003 UNAUTHENTICATED`.
   Режим — `T_INVEST_SANDBOX` (`true` по умолчанию из `application.yml`); sandbox-токен против prod-эндпоинта не работает.
+- `tinkoff.sandbox` биндить как `boolean` (не `String`): строковое поле читает `"false"` как непустое значение
+  и режим контура определяется неверно. Эндпоинты берутся из SDK, не хардкодь их в конфиге.
+- WSL не наследует переменные Windows — запуск модулей из WSL требует `WSLENV` либо `export`
+  (README, «Переменные окружения T-Invest»).
 - Сообщения коммитов — `type(scope): description` (feat/fix/refactor/test/docs).
 
 ## 5. Commands
