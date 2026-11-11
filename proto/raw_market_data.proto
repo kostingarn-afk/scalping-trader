@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package scalping.proto;
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+option java_package = "ru.scalping.proto";
+option java_multiple_files = true;
+option java_outer_classname = "RawMarketDataProto";
+
+// Сырые рыночные данные от Collector.
+// Один топик raw-market-data, несколько типов сообщений (payload_type).
+message RawMarketData {
+  string figi = 1;                          // идентификатор инструмента
+  google.protobuf.Timestamp ts = 2;         // время события
+  PayloadType payload_type = 3;             // тип данных
+  oneof payload {
+    Candle candle = 10;
+    OrderBook order_book = 11;
+    Trade trade = 12;
+    TradingStatusInfo info = 13;
+  }
+}
+
+enum PayloadType {
+  CANDLE = 0;
+  ORDER_BOOK = 1;
+  TRADE = 2;
+  INFO = 3;
+}
+
+message Candle {
+  google.protobuf.Timestamp begin = 1;
+  google.protobuf.Timestamp end = 2;
+  Quotation open = 3;
+  Quotation close = 4;
+  Quotation high = 5;
+  Quotation low = 6;
+  int64 volume = 7;                         // в лотах
+  bool is_complete = 8;
+}
+
+message OrderBook {
+  repeated OrderBookItem bids = 1;          // до 10 уровней
+  repeated OrderBookItem asks = 2;
+  Quotation limit_price_up = 3;             // верхний предел цены
+  Quotation limit_price_down = 4;
+}
+
+message OrderBookItem {
+  Quotation price = 1;
+  int64 quantity = 2;                       // в лотах
+}
+
+message Trade {
+  Quotation price = 1;
+  int64 quantity = 2;                       // в лотах
+  string trade_id = 3;
+  TradeDirection direction = 4;             // buy / sell / unspecified
+}
+
+message TradingStatusInfo {
+  int32 trading_status = 1;                 // SecurityTradingStatus
+  int32 limit_order_available_flag = 2;
+  int32 market_order_available_flag = 3;
+}

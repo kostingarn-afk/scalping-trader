@@ -1,0 +1,40 @@
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: collector
+
+collector:
+  instruments:
+    - BR
+    - SBER
+    - TCSG
+  candle-interval: 1min
+  order-book-depth: 10
+  reconnect-initial-ms: 1000
+  reconnect-max-ms: 30000
+  instrument-refresh-cron: "0 0 3 * * *"
+
+kafka:
+  bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+  topic:
+    raw-market-data: raw-market-data
+
+tinkoff:
+  token: ${T_INVEST_TOKEN:}
+  sandbox: ${T_INVEST_SANDBOX:true}
+
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/scalping}
+    username: ${DB_USER:scalping}
+    password: ${DB_PASSWORD:scalping}

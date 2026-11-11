@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package scalping.proto;
+
+option java_package = "ru.scalping.proto";
+option java_multiple_files = true;
+option java_outer_classname = "CommonProto";
+
+// Денежная величина в виде целой и дробной части.
+// Совпадает с Quotation из T-Invest API.
+message Quotation {
+  int64 units = 1;
+  int32 nano = 2;  // 0..999_999_999
+}
+
+// Направление сделки.
+enum TradeDirection {
+  TRADE_DIRECTION_UNSPECIFIED = 0;
+  TRADE_DIRECTION_BUY = 1;
+  TRADE_DIRECTION_SELL = 2;
+}

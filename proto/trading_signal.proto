@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package scalping.proto;
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+option java_package = "ru.scalping.proto";
+option java_multiple_files = true;
+option java_outer_classname = "TradingSignalProto";
+
+// Сигнал от Analyzer к Trader.
+// Каждый сигнал имеет signal_id для идемпотентности и expires_at.
+message TradingSignal {
+  string signal_id = 1;                     // UUID, идемпотентность
+  string figi = 2;
+  google.protobuf.Timestamp ts = 3;         // время генерации
+  google.protobuf.Timestamp expires_at = 4; // время устаревания
+  SignalType signal = 5;                    // BUY / SELL / HOLD
+  float confidence = 6;                     // 0.0–1.0
+  string strategy_id = 7;
+  string analyzer_version = 8;
+  Quotation suggested_price = 9;            // предлагаемая цена входа
+  Quotation suggested_sl = 10;              // предлагаемый Stop-Loss
+  Quotation suggested_tp = 11;              // предлагаемый Take-Profit
+  int32 position_size_hint = 12;            // рекомендуемый размер в лотах
+  map<string, float> indicators = 13;       // значения индикаторов (для аудита)
+}
+
+enum SignalType {
+  BUY = 0;
+  SELL = 1;
+  HOLD = 2;
+}

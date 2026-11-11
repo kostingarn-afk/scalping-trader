@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package scalping.proto;
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+option java_package = "ru.scalping.proto";
+option java_multiple_files = true;
+option java_outer_classname = "TradeResultProto";
+
+// События по сделкам от Trader.
+// Топик trade-results — compact, ключ trade_id, значение — актуальное состояние сделки.
+message TradeResult {
+  string trade_id = 1;                      // UUID сделки
+  string signal_id = 2;                     // сигнал-источник (может быть пустым)
+  string figi = 3;
+  TradeEventType event_type = 4;            // тип события
+  google.protobuf.Timestamp ts = 5;
+  string order_id = 6;                      // идемпотентный ключ
+  string exchange_order_id = 7;
+  TradeDirection direction = 8;
+  int32 quantity_lots = 9;
+  Quotation price = 10;                     // цена исполнения
+  Quotation commission = 11;
+  Quotation pnl = 12;                       // для событий закрытия
+  string reject_reason = 13;                // для reject
+}
+
+enum TradeEventType {
+  OPENED = 0;          // позиция открыта (ордер исполнен)
+  PARTIAL_FILL = 1;    // частичное исполнение
+  SL_HIT = 2;          // сработал Stop-Loss
+  TP_HIT = 3;          // сработал Take-Profit
+  TIMEOUT_CLOSED = 4;  // закрытие по таймауту удержания
+  REJECTED = 5;        // ордер отклонён
+  CANCELLED = 6;       // ордер отменён
+  CLOSED = 7;          // позиция полностью закрыта
+}

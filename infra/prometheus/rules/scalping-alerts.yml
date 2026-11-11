@@ -1,0 +1,81 @@
+# Alerting rules для scalping-trading-system (задача 5.3).
+# Проверка: promtool check rules scalping-alerts.yml
+groups:
+  - name: scalping-api
+    rules:
+      # API disconnect: стрим down >30с (нет сообщений от collector)
+      - alert: api_disconnect
+        expr: time() - timestamp(messages_published_total{service="collector"}) > 30
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "T-Invest API stream disconnected"
+          description: "No market data published for {{ $value }}s"
+
+      # Token error 40003 — экспортируется из trader при ошибке
+      - alert: token_error
+        expr: increase(api_errors_total{service="trader"}[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "T-Invest API token error (40003)"
+          description: "Token invalid or expired — trading halted"
+
+      # Stale data: нет данных по инструменту >30с
+      - alert: stale_data
+        expr: time() - timestamp(messages_published_total{service="collector"}) > 30
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stale market data"
+          description: "No fresh data for >30s"
+
+  - name: scalping-risk
+    rules:
+      # PnL Circuit Breaker сработал
+      - alert: pnl_circuit_breaker
+        expr: circuit_breaker_active{service="trader"} == 1
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "PnL Circuit Breaker triggered"
+          description: "Daily loss limit reached — trading blocked until next session"
+
+      # Ордер rejected
+      - alert: order_rejected
+        expr: increase(orders_rejected_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order rejected"
+          description: "{{ $value }} orders rejected in last minute"
+
+  - name: scalping-kafka
+    rules:
+      # Consumer lag >1000
+      - alert: consumer_lag
+        expr: consumer_lag > 1000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag high"
+          description: "Consumer lag {{ $value }} on partition {{ $labels.partition }}"
+
+  - name: scalping-token
+    rules:
+      # Token expiring soon (7 дней) — метрика экспортируется из trader
+      # token_expires_in_days — gauge, обновляется из trader
+      - alert: token_expiring_soon
+        expr: token_expires_in_days < 7
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "T-Invest API token expiring soon"
+          description: "Token expires in {{ $value }} days — renew before expiry"

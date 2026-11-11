@@ -1,0 +1,39 @@
+# Prometheus scrape config для scalping-trading-system (задача 5.1).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: scalping-mvp
+
+rule_files:
+  - /etc/prometheus/rules/scalping-alerts.yml
+
+scrape_configs:
+  # Data Collector (Java, Micrometer) — порт 8081
+  - job_name: collector
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['collector:8081']
+        labels:
+          service: collector
+
+  # Trader (Java, Micrometer) — порт 8082
+  - job_name: trader
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['trader:8082']
+        labels:
+          service: trader
+
+  # Analyzer (Python, prometheus_client) — порт 8000
+  - job_name: analyzer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['analyzer:8000']
+        labels:
+          service: analyzer
+
+  # Prometheus self-monitoring
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

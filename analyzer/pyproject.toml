@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "analyzer"
+version = "0.1.0"
+description = "Анализ рыночных данных, расчёт индикаторов, генерация торговых сигналов"
+authors = ["Scalping Team <scalping@example.com>"]
+packages = [{include = "analyzer", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = "^1.26"
+scipy = "^1.13"
+TA-Lib = "^0.4.32"
+kafka-python = "^2.0"
+asyncpg = "^0.29"
+prometheus-client = "^0.20"
+protobuf = "^4.25"
+pyyaml = "^6.0"
+uvloop = {version = "^0.19", markers = "sys_platform != 'win32'"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2"
+pytest-asyncio = "^0.23"
+pytest-cov = "^5.0"
+testcontainers = "^4.7"
+ruff = "^0.5"
+
+[tool.poetry.scripts]
+analyzer = "analyzer.main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
