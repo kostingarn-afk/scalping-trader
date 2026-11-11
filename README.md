@@ -51,6 +51,7 @@ T-Invest API (gRPC)
 ├── trader/                        # Java/Maven — Trader + Flyway-миграции
 ├── infra/                         # Kafka-топики, Prometheus, Grafana
 │   ├── kafka/create-topics.sh
+│   ├── local/                     # bootstrap/up/down, env.sh, README.md — PG+Kafka в WSL2, без Docker Desktop
 │   ├── prometheus/                # prometheus.yml + rules/scalping-alerts.yml
 │   └── grafana/dashboards/        # scalping-mvp.json
 ├── openspec/                      # OpenSpec: proposal, specs, design, tasks
@@ -80,8 +81,36 @@ T-Invest API (gRPC)
 ### Требования
 - Java 21, Maven 3.9+
 - Python 3.11, poetry, ta-lib (системная C-библиотека)
-- PostgreSQL 15, Apache Kafka, Prometheus + Grafana
-- Токен T-Invest API (env `T_INVEST_TOKEN`)
+- PostgreSQL 15, Apache Kafka, Prometheus + Grafana (локально PostgreSQL и Kafka поднимаются
+  `infra/local/up.sh` — Docker Engine в WSL2, без Docker Desktop)
+- Токен T-Invest API — только в env-переменной `T_INVEST_TOKEN` (см. ниже)
+
+### Переменные окружения T-Invest
+
+| Переменная | Значение | Дефолт в `application.yml` |
+|---|---|---|
+| `T_INVEST_TOKEN` | сырой токен из личного кабинета T-Invest (`t.…`), **без** префикса `Bearer` | пусто — обязательна |
+| `T_INVEST_SANDBOX` | `true` — sandbox, `false` — production | `true` |
+
+`Bearer` добавляет сам SDK: `InvestApi.addAuthHeader(...)` формирует `Authorization: Bearer <token>`
+из значения токена как есть. Если положить `Bearer` в переменную, на сервер уйдёт
+`Authorization: Bearer Bearer …` и запрос вернёт `40003 UNAUTHENTICATED`.
+
+```powershell
+# Windows PowerShell
+[Environment]::SetEnvironmentVariable("T_INVEST_TOKEN", "t.xxxxxxxx", "User")   # постоянно, новые процессы
+$env:T_INVEST_TOKEN = "t.xxxxxxxx"                                              # текущая сессия
+$env:T_INVEST_SANDBOX = "true"
+```
+
+```bash
+# bash (WSL/Linux/CI)
+export T_INVEST_TOKEN="t.xxxxxxxx"
+export T_INVEST_SANDBOX=true
+```
+
+Sandbox-токен действует только против `sandbox-invest-public-api.tinkoff.ru`; prod-токен с
+`T_INVEST_SANDBOX=true` получит ошибку авторизации. `.env` в репозиторий не добавляется.
 
 ### Сборка (после реализации привязок SDK)
 ```bash
@@ -93,13 +122,24 @@ cd analyzer && poetry install && poetry run protoc ../proto/*.proto --python_out
 ```
 
 ### Запуск инфраструктуры
-```bash
-# Kafka-топики
-KAFKA_BOOTSTRAP=localhost:9092 KAFKA_BIN=/opt/kafka/bin infra/kafka/create-topics.sh
 
-# PostgreSQL — Flyway-миграции применяются автоматически при старте Trader
-# Prometheus + Grafana — конфиги в infra/prometheus/, infra/grafana/
+PostgreSQL 15 и Kafka в Docker **без Docker Desktop** (WSL2 + Docker Engine) — полный runbook
+в [`infra/local/README.md`](infra/local/README.md).
+
+```bash
+bash infra/local/bootstrap-wsl-docker.sh   # однократно, внутри WSL2 Ubuntu
+bash infra/local/up.sh                     # скачать образы, запустить, создать топики
+bash infra/local/down.sh                   # остановить (--purge — вместе с volume БД и сетью)
 ```
+
+```bash
+# Kafka-топики вручную (если контейнер scalping-kafka уже запущен; имя — при дефолтном KAFKA_CONTAINER)
+docker exec -e KAFKA_BOOTSTRAP=scalping-kafka:29092 -e KAFKA_BIN=/opt/kafka/bin \
+  scalping-kafka bash -c 'tr -d "\r" < /opt/scalping/create-topics.sh | bash'
+```
+
+Flyway-миграции применяются автоматически при старте Trader.
+Prometheus + Grafana — конфиги в `infra/prometheus/`, `infra/grafana/`.
 
 ### Запуск модулей
 ```bash
@@ -110,10 +150,13 @@ mvn -pl trader spring-boot:run      # порт 8082, /actuator/prometheus
 
 ### Тесты
 ```bash
-mvn test                           # Collector + Trader (unit)
+mvn test                           # Collector + Trader (unit; группы не разделены — см. ниже)
 cd analyzer && poetry run pytest   # Analyzer (unit)
-mvn test -Dgroups=e2e              # E2E (требует sandbox-окружение)
+mvn test -Dgroups=e2e              # только e2e-тег (нужны sandbox-окружение и env T_INVEST_TOKEN)
 ```
+
+Разделение unit/e2e в `pom.xml` не настроено: `mvn test` выполняет и классы с `@Tag("e2e")`,
+тег `e2e` — информационный. Реальные sandbox-тесты гейтятся `@EnabledIfEnvironmentVariable(named = "T_INVEST_TOKEN")`.
 
 ### OpenSpec
 ```bash

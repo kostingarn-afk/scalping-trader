@@ -59,9 +59,6 @@ public class StreamSubscriptionManager {
                 streamService.subscribe(figis, this::handle);
                 // subscribe блокирует до разрыва; если вышел без исключения — выходим
                 return;
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
             } catch (Exception e) {
                 metrics.streamReconnect();
                 metrics.apiError();

@@ -39,7 +39,7 @@
         <!-- T-Invest SDK -->
         <dependency>
             <groupId>ru.tinkoff.piapi</groupId>
-            <artifactId>sdk-java</artifactId>
+            <artifactId>java-sdk-core</artifactId>
         </dependency>
 
         <!-- Kafka -->

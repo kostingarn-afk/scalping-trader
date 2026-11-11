@@ -1,0 +1,6 @@
+# Shell-скрипты — всегда LF: bash в WSL2/контейнере падает на CRLF ("$'\r': command not found"),
+# а core.autocrlf=true на Windows иначе конвертирует их при checkout.
+*.sh text eol=lf
+
+# Сам файл правил — тоже LF, иначе CRLF попадёт в шаблоны.
+.gitattributes text eol=lf

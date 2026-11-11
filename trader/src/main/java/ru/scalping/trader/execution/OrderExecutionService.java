@@ -1,5 +1,7 @@
 package ru.scalping.trader.execution;
 
+import java.util.UUID;
+
 /**
  * Сервис исполнения ордеров через T-Invest API (задачи 4.5, 4.6).
  *

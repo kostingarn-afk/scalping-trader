@@ -12,7 +12,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * сигнал BUY → ордер → SL/TP выставлены → позиция в БД.
  *
  * <p>Требует поднятое окружение: Kafka, PostgreSQL, sandbox T-Invest API.
- * Запуск: {@code mvn test -Dtags=e2e -DT_INVEST_TOKEN=...}
+ * Запуск: {@code T_INVEST_TOKEN=t.xxx mvn test -Dgroups=e2e}
+ * (разделение групп в pom.xml не настроено, поэтому подходит и обычный {@code mvn test};
+ * сам тест гейтится переменной окружения {@code T_INVEST_TOKEN}).
  */
 @Tag("e2e")
 @EnabledIfEnvironmentVariable(named = "T_INVEST_TOKEN", matches = ".+")

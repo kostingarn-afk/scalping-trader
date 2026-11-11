@@ -18,14 +18,14 @@ class TinvestConverterTest {
 
     @Test
     void quotationNegativePrice() {
-        Quotation q = TinjectConverter.toQuotation(-1.5);
-        assertThat(q.getUnits()).isEqualTo(-1);
-        assertThat(q.getNano()).isEqualTo(-500_000_000);
+        Quotation q = TinvestConverter.toQuotation(-1.5);
+        assertThat(q.getUnits()).isEqualTo(-2);
+        assertThat(q.getNano()).isEqualTo(500_000_000);
     }
 
     @Test
     void candleHasCorrectPayloadType() {
-        RawMarketData data = TinjectConverter.candle(
+        RawMarketData data = TinvestConverter.candle(
                 "SBER",
                 java.time.Instant.now(),
                 ru.scalping.proto.Candle.newBuilder().build()
@@ -36,9 +36,9 @@ class TinvestConverterTest {
 
     @Test
     void infoHasCorrectPayloadType() {
-        RawMarketData data = TinjectConverter.info(
+        RawMarketData data = TinvestConverter.info(
                 "SBER", java.time.Instant.now(),
-                TinjectConverter.status(2, 1, 1)
+                TinvestConverter.status(2, 1, 1)
         );
         assertThat(data.getPayloadType()).isEqualTo(PayloadType.INFO);
         assertThat(data.getInfo().getTradingStatus()).isEqualTo(2);

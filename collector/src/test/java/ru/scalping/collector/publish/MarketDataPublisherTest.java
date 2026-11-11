@@ -12,6 +12,7 @@ import ru.scalping.collector.metrics.CollectorMetrics;
 import ru.scalping.proto.PayloadType;
 import ru.scalping.proto.RawMarketData;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
@@ -43,9 +44,5 @@ class MarketDataPublisherTest {
         assertThat(rec.topic()).isEqualTo("raw-market-data");
         assertThat(rec.key()).isEqualTo("SBER");
         assertThat(rec.value()).isNotEmpty();
-    }
-
-    private static org.assertj.core.api.Assertions assertThat(Object o) {
-        return org.assertj.core.api.Assertions.assertThat(o);
     }
 }

@@ -18,7 +18,8 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 - **Collector, Trader**: Java 21, Spring Boot 3.2, Maven (multi-module), Micrometer + Prometheus
 - **Analyzer**: Python 3.11, poetry, ta-lib, numpy, scipy, asyncpg, prometheus_client
 - **Protobuf**: 3.25, схемы в `proto/`, генерация при сборке (Java — `protobuf-maven-plugin`, Python — `protoc`)
-- **T-Invest SDK**: `ru.tinkoff.piapi:sdk-java:1.8.0` (Java); Python — по .proto
+- **T-Invest SDK**: `ru.tinkoff.piapi:java-sdk-core:1.8` (Java, Maven Central; координат `sdk-java` не существует,
+  репозиторий `opensource.tbank.ru` требует авторизации); Python — по .proto
 - **БД**: PostgreSQL 15, Flyway (владелец миграций — модуль `trader`)
 - **Брокер**: Apache Kafka, 3 топика (`raw-market-data`, `trading-signals`, `trade-results`)
 - **Мониторинг**: Prometheus + Grafana, alerting rules
@@ -38,6 +39,7 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 ├── trader/                        # Java/Maven — исполнение + риск + позиции (Kafka → Kafka)
 │   └── src/main/resources/db/migration/  # Flyway: V1 (7 таблиц), V2 (risk_config seed + TTL)
 ├── infra/                         # kafka/create-topics.sh, prometheus/, grafana/
+│   └── local/                     # bootstrap/up/down, env.sh, README.md — PostgreSQL 15 + Kafka в WSL2 (Docker Engine, без Docker Desktop)
 ├── docs/                          # исходная документация (ТЗ, API, матбиблиотеки, блок-схемы)
 └── openspec/                      # proposal, specs, design, tasks
 ```
@@ -102,6 +104,9 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 ### Общее
 - Комментарии — только для сложной бизнес-логики («почему», не «что»). Javadoc/docstring на публичный API.
 - Секреты (токены, пароли) — только через env-переменные (`${T_INVEST_TOKEN}`, `${DB_PASSWORD}`), никогда в коде.
+- `T_INVEST_TOKEN` — сырой токен T-Invest (`t.…`) **без** префикса `Bearer`: SDK (`InvestApi.addAuthHeader`) добавляет
+  `Bearer ` сам, иначе заголовок станет `Bearer Bearer …` и вернётся `40003 UNAUTHENTICATED`.
+  Режим — `T_INVEST_SANDBOX` (`true` по умолчанию из `application.yml`); sandbox-токен против prod-эндпоинта не работает.
 - Сообщения коммитов — `type(scope): description` (feat/fix/refactor/test/docs).
 
 ## 5. Commands
@@ -109,11 +114,11 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 ### Java (Collector + Trader)
 ```bash
 mvn compile                                    # компиляция + генерация Protobuf
-mvn test                                       # unit-тесты (Collector + Trader)
-mvn test -Dtags=e2e                            # E2E (требует sandbox-окружение)
+mvn test                                       # Collector + Trader (unit; группы не разделены, см. §6)
+mvn test -Dgroups=e2e                          # только e2e-тег (тег информационный; нужны sandbox и env T_INVEST_TOKEN)
 mvn -pl collector spring-boot:run              # запуск Collector (порт 8081)
 mvn -pl trader spring-boot:run                 # запуск Trader (порт 8082)
-mvn -pl trader flyway:migrate                  # применить миграции вручную
+# Flyway: миграции применяются автоматически при старте Trader; flyway-maven-plugin не настроен
 ```
 
 ### Python (Analyzer)
@@ -129,12 +134,22 @@ poetry run analyzer                                             # запуск (
 
 ### Инфраструктура
 ```bash
-# Kafka-топики
-KAFKA_BOOTSTRAP=localhost:9092 KAFKA_BIN=/opt/kafka/bin infra/kafka/create-topics.sh
+# Локальные PostgreSQL 15 + Kafka: Docker Engine внутри WSL2, Docker Desktop не нужен.
+# Скрипты и runbook — infra/local/README.md (порты 5432/9092, креды scalping/scalping).
+bash infra/local/bootstrap-wsl-docker.sh   # однократно, внутри WSL (docker-ce, fallback — docker.io)
+bash infra/local/up.sh                     # образы + контейнеры + 3 топика
+bash infra/local/down.sh                   # остановить (--purge — вместе с volume БД и сетью scalping-net)
+
+# Kafka-топики вручную (контейнер scalping-kafka уже запущен; имя — при дефолтном KAFKA_CONTAINER)
+docker exec -e KAFKA_BOOTSTRAP=scalping-kafka:29092 -e KAFKA_BIN=/opt/kafka/bin \
+  scalping-kafka bash -c 'tr -d "\r" < /opt/scalping/create-topics.sh | bash'
 
 # Проверка alert-rules
 promtool check rules infra/prometheus/rules/scalping-alerts.yml
 ```
+
+Flyway-миграции применяет Trader при старте; Kafka-топики создаются `create-topics.sh`
+(в контейнере он смонтирован как `/opt/scalping/create-topics.sh`).
 
 ### OpenSpec
 ```bash
@@ -151,8 +166,9 @@ openspec archive --change <change-id>          # после ревью
 - Тесты в `src/test/java/` зеркалируют структуру `src/main/java/`.
 - Unit-тесты — Mockito для моков SDK, AssertJ для assert'ов.
 - Интеграционные (sandbox) — тег `@Tag("e2e")` обязателен; `@EnabledIfEnvironmentVariable(named = "T_INVEST_TOKEN")` — для тестов, реально ходящих в sandbox.
-- БД-тесты — Testcontainers PostgreSQL (класс в `trader/src/test/`).
-- Перед завершением задачи запускай `mvn test` и убедись, что тесты проходят.
+  Разделение групп в `pom.xml` не настроено: `mvn test` выполняет и e2e-классы, тег `e2e` — информационный.
+- БД-тесты — Testcontainers PostgreSQL: зависимости объявлены в `trader/pom.xml`, реальный БД-тест пока не написан.
+- Перед завершением задачи запускай `mvn test` (по явному запросу пользователя, см. §7) и убедись, что тесты проходят.
 
 ### Python
 - Тесты в `analyzer/tests/`, имя `test_*.py`.

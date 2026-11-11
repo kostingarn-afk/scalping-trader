@@ -2,7 +2,6 @@ package ru.scalping.trader.e2e;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import ru.scalping.trader.position.Position;
 import ru.scalping.trader.position.PositionStore;
 import ru.scalping.trader.recovery.ExchangeStateProvider;

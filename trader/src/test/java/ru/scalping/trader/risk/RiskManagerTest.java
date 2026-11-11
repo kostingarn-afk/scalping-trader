@@ -20,10 +20,10 @@ class RiskManagerTest {
     @Test
     void positionSizeTooSmallRejected() {
         RiskManager rm = new RiskManager();
-        // entry=100, sl=99.9999, lot=1, deposit=200000 → очень малый объём
-        int size = rm.calculatePositionSize(100.0, 99.9999, 1, 200_000, cfg);
+        // entry=100, sl=99, lot=1, deposit=50 → допустимый убыток 1% = 0.5 руб → 0 лотов
+        int size = rm.calculatePositionSize(100.0, 99.0, 1, 50, cfg);
         assertThat(size).isLessThan(1);
-        RiskCheckResult result = rm.check("SBER", 100.0, 99.9999, 1, 200_000, 0.0);
+        RiskCheckResult result = rm.check("SBER", 100.0, 99.0, 1, 50, 0.0);
         assertThat(result.allowed()).isFalse();
         assertThat(result.rejectReason()).contains("position_size too small");
     }
