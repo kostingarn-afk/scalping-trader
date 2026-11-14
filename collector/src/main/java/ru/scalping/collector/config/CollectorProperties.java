@@ -7,7 +7,8 @@ import java.util.List;
 /**
  * Конфигурация Collector.
  *
- * @param instruments   список тикеров для подписки (BR, SBER, TCSG)
+ * @param instruments   список инструментов для подписки: {@code TICKER} или {@code TICKER@CLASS}
+ *                      (например, {@code SBER}, {@code SiZ6@SPBFUT})
  * @param candleInterval интервал свечей (1min)
  * @param orderBookDepth глубина стакана
  * @param reconnectInitialMs начальная задержка переподключения (1000)

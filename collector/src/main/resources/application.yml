@@ -15,9 +15,9 @@ management:
 
 collector:
   instruments:
-    - BR
-    - SBER
-    - TCSG
+    - SBER          # TQBR, акция
+    - GAZP          # TQBR, акция
+    - SiZ6@SPBFUT   # фьючерс Si, экспирация 2026-12-18 (перед экспирацией — роллировать на следующий)
   candle-interval: 1min
   order-book-depth: 10
   reconnect-initial-ms: 1000

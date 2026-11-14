@@ -68,6 +68,30 @@ public final class TinvestConverter {
         return OrderBookItem.newBuilder().setPrice(price).setQuantity(quantity).build();
     }
 
+    /** Сборка свечи из уже сконвертированных частей (SDK-типы не проникают в конвертер). */
+    public static Candle candleValue(Timestamp begin, Timestamp end, Quotation open, Quotation close,
+                                     Quotation high, Quotation low, long volume, boolean isComplete) {
+        return Candle.newBuilder()
+                .setBegin(begin).setEnd(end)
+                .setOpen(open).setClose(close)
+                .setHigh(high).setLow(low)
+                .setVolume(volume)
+                .setIsComplete(isComplete)
+                .build();
+    }
+
+    /**
+     * Направление сделки по числовому значению {@code TradeDirection} T-Invest API
+     * (0 — unspecified, 1 — buy, 2 — sell).
+     */
+    public static TradeDirection tradeDirection(int code) {
+        return switch (code) {
+            case 1 -> TradeDirection.TRADE_DIRECTION_BUY;
+            case 2 -> TradeDirection.TRADE_DIRECTION_SELL;
+            default -> TradeDirection.TRADE_DIRECTION_UNSPECIFIED;
+        };
+    }
+
     public static Trade trade(Quotation price, long quantity, String tradeId, TradeDirection dir) {
         return Trade.newBuilder()
                 .setPrice(price).setQuantity(quantity)
