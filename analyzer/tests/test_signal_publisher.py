@@ -1,7 +1,7 @@
 """Тесты publisher — задача 3.7: BUY публикуется, HOLD — нет."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from analyzer.config import AnalyzerConfig
 from analyzer.signal_publisher import SignalPublisher

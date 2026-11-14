@@ -36,6 +36,21 @@ def test_hold_on_insufficient_data():
     assert sig.type == SignalType.HOLD
 
 
+def test_hold_on_flat_market():
+    # RSI=0 от ta-lib на неизменном ряду + нулевая ширина BB не должны давать BUY
+    ind = Indicators(rsi=0.0, bb_lower=100.0, bb_upper=100.0, bb_middle=100.0, atr=0.0)
+    sig = mean_reversion(ind, price=100.0)
+    assert sig.type == SignalType.HOLD
+    assert sig.reason == "flat market: no volatility"
+
+
+def test_hold_when_atr_missing():
+    # Без ATR нельзя построить SL/TP — сигнал не генерируется
+    ind = Indicators(rsi=20.0, bb_lower=100.0, bb_upper=110.0, atr=None)
+    sig = mean_reversion(ind, price=99.0)
+    assert sig.type == SignalType.HOLD
+
+
 def test_sl_tp_from_atr():
     ind = Indicators(rsi=20.0, bb_lower=100.0, bb_upper=110.0, atr=2.0)
     sig = mean_reversion(ind, price=99.0)

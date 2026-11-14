@@ -43,6 +43,12 @@ def mean_reversion(ind: Indicators, price: float, atr_mult_sl: float = 1.5, atr_
     if ind.rsi is None or ind.bb_lower is None or ind.bb_upper is None:
         return Signal(SignalType.HOLD, 0.0, price, None, None, "insufficient data")
 
+    # Плоский рынок: при нулевой ширине BB условия «цена ≤ lower» и «цена ≥ upper» истинны
+    # одновременно, а ta-lib на неизменном ряду отдаёт RSI=0 — получается ложный BUY
+    # с максимальной уверенностью. Без волатильности SL/TP построить нельзя, поэтому HOLD.
+    if ind.bb_upper <= ind.bb_lower or ind.atr is None or ind.atr <= 0:
+        return Signal(SignalType.HOLD, 0.0, price, None, None, "flat market: no volatility")
+
     # BUY: перепроданность
     if ind.rsi < 30 and price <= ind.bb_lower:
         sl = _sl_tp(price, ind.atr, atr_mult_sl, sign=-1)

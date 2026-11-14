@@ -14,8 +14,10 @@ from analyzer.indicators import (
 def test_rsi_on_flat_series():
     closes = np.full(20, 100.0)
     rsi = compute_rsi(closes, period=7)
-    # На плоском ряду RSI = 100 (нет падений) либо NaN в реализации ta-lib
-    assert rsi is None or rsi == 100.0
+    # ta-lib считает RSI = 100 - 100/(1+RS), где RS = avg_gain/avg_loss = 0/0,
+    # и на неизменном ряду отдаёт 0.0 (не 100.0). Сигналы на таком ряду отсекает
+    # guard плоского рынка в strategy.mean_reversion.
+    assert rsi is None or rsi == 0.0
 
 
 def test_rsi_insufficient_data():

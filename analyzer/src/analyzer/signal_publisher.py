@@ -9,15 +9,12 @@ from typing import Optional
 
 from kafka import KafkaProducer
 
+from . import proto_loader
 from .config import AnalyzerConfig
 from .strategy import Signal, SignalType
 
-# Импорт сгенерированного protobuf-модуля (генерация через protoc в build-шаге).
-# Имя модуля может отличаться в зависимости от настройки protoc.
-try:
-    import trading_signal_pb2  # type: ignore
-except ImportError:  # pragma: no cover — protobuf генерируется при сборке
-    trading_signal_pb2 = None
+# Модуль генерируется build-шагом (protoc); при отсутствии публикация пропускается.
+trading_signal_pb2 = proto_loader.trading_signal_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +30,7 @@ class SignalPublisher:
             key_serializer=lambda k: k.encode("utf-8") if k else None,
             value_serializer=lambda v: v,
             acks=1,
-            compression_type="lz4",
+            compression_type=self._config.compression_type,
         )
 
     def close(self) -> None:
@@ -55,7 +52,8 @@ class SignalPublisher:
         pb = trading_signal_pb2.TradingSignal(
             signal_id=signal_id,
             figi=figi,
-            signal=0 if signal.type == SignalType.BUY else 1,
+            signal=(trading_signal_pb2.BUY if signal.type == SignalType.BUY
+                    else trading_signal_pb2.SELL),
             confidence=signal.confidence,
             strategy_id=strategy_id,
             analyzer_version=analyzer_version,

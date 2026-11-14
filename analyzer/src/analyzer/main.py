@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from .commission_filter import CommissionFilter
 from .config import AnalyzerConfig
 from .consumer import start_workers, join_workers
+from .handler import make_handler
 from .indicators import compute_all
 from .metrics import start_metrics_server, signals_generated, signals_rejected, analysis_latency
 from .repository import AnalysisRepository, AnalysisRecord
@@ -44,7 +45,8 @@ class AnalyzerPipeline:
             lows = candle_data.get("lows")
             volumes = candle_data.get("volumes")
             price = candle_data.get("price")
-            if not all([closes, highs, lows, volumes, price]):
+            # numpy-массив нельзя проверять через all([...]) — истинность неоднозначна
+            if any(v is None for v in (closes, highs, lows, volumes, price)) or len(closes) == 0:
                 return
 
             ind = compute_all(closes, highs, lows, volumes)
@@ -91,14 +93,8 @@ def main() -> None:
     start_metrics_server(config.metrics_port)
     logger.info("Starting analyzer with %d processes", config.num_processes)
 
-    pipeline = AnalyzerPipeline(config)
-
-    def handler(msg):
-        # Упрощённый обработчик: десериализация Protobuf и вызов pipeline.process
-        # Полная реализация — после генерации protobuf-кода.
-        logger.debug("Received message from partition %d", msg.partition)
-
-    workers = start_workers(config, handler, config.num_processes)
+    # Обработчик создаётся внутри каждого процесса: свой asyncio-loop и пул asyncpg.
+    workers = start_workers(config, make_handler, config.num_processes)
     join_workers(workers)
 
 

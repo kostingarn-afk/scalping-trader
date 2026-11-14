@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import signal
-import sys
 from multiprocessing import Process
 from typing import Callable, List
 
@@ -59,11 +58,19 @@ def run_consumer(config: AnalyzerConfig, process_id: int, handler: Callable) -> 
         consumer.close()
 
 
-def start_workers(config: AnalyzerConfig, handler: Callable, num_processes: int) -> List[Process]:
-    """Запуск N процессов-консьюмеров (задача 3.2)."""
+def _run_worker(config: AnalyzerConfig, process_id: int, handler_factory: Callable) -> None:
+    """Обработчик создаётся внутри процесса: asyncio-loop и пул asyncpg не наследуются."""
+    run_consumer(config, process_id, handler_factory(config))
+
+
+def start_workers(config: AnalyzerConfig, handler_factory: Callable, num_processes: int) -> List[Process]:
+    """Запуск N процессов-консьюмеров (задача 3.2).
+
+    @param handler_factory вызывается в каждом процессе: `handler_factory(config) -> handler(msg)`
+    """
     processes = []
     for i in range(num_processes):
-        p = Process(target=run_consumer, args=(config, i, handler), daemon=True)
+        p = Process(target=_run_worker, args=(config, i, handler_factory), daemon=True)
         p.start()
         processes.append(p)
         logger.info("Started analyzer worker %d (pid=%d)", i, p.pid)
