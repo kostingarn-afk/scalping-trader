@@ -127,6 +127,32 @@ Sandbox-токен действует только против `sandbox-invest-
 sandbox-токен. Prod-токен с `T_INVEST_SANDBOX=true` получит ошибку авторизации.
 `.env` в репозиторий не добавляется.
 
+#### Сертификат sandbox-хоста (обязательно для Java-модулей)
+
+TLS-цепочка `sandbox-invest-public-api.tinkoff.ru` замыкается на самоподписанный корень
+**«Russian Trusted Root CA» (Минцифры)**. Его нет ни в `ca-certificates` Linux, ни в `cacerts` JDK,
+поэтому Java падает при подключении с `PKIX path building failed` (curl при этом работает — ему
+корень известен из системного/Windows-хранилища). JDK менять не нужно: создайте копию `cacerts`
+с добавленным корнем и передайте её через `JAVA_TOOL_OPTIONS`.
+
+```bash
+# 1) root из TLS-цепочки (сервер отдаёт полную цепочку, третий сертификат — корень)
+echo | openssl s_client -connect sandbox-invest-public-api.tinkoff.ru:443 \
+  -servername sandbox-invest-public-api.tinkoff.ru -showcerts 2>/dev/null \
+  | awk '/BEGIN CERTIFICATE/{n++} n==3' > /tmp/russian_root.pem
+
+# 2) копия cacerts + корень
+cp "$JAVA_HOME/lib/security/cacerts" /usr/local/share/scalping-truststore.p12
+sudo keytool -importcert -noprompt -alias russian_trusted_root_ca -file /tmp/russian_root.pem \
+  -keystore /usr/local/share/scalping-truststore.p12 -storepass changeit
+
+# 3) запуск модулей с этим truststore
+export JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=/usr/local/share/scalping-truststore.p12 \
+  -Djavax.net.ssl.trustStorePassword=changeit"
+```
+
+Без этого шага Collector падает на открытии стрима, а Trader — при определении `accountId`.
+
 ### Сборка (после реализации привязок SDK)
 ```bash
 # Java-модули (генерация Protobuf + компиляция)
@@ -135,6 +161,15 @@ mvn compile
 # Python
 cd analyzer && poetry install && poetry run protoc ../proto/*.proto --python_out src/analyzer/
 ```
+
+Для Python-генерации нужен **protoc 25.x** (`--version` → `libprotoc 25.3`): protobuf-runtime проекта
+(`protobuf 4.25`) отвергает модули, сгенерированные protoc 3.12 из репозитория Ubuntu
+(`Descriptors cannot be created directly`). Готовый бинарь: `protoc-25.3-linux-x86_64.zip` с GitHub
+releases, распаковать в `/usr/local`. Модули `*_pb2.py` в git не хранятся (`.gitignore`) и создаются
+этим шагом; без них Analyzer поднимает воркеров, но падает на первом сообщении.
+
+`analyzer/poetry.lock` создаётся при `poetry install` — его следует держать в git для воспроизводимости
+окружения.
 
 ### Запуск инфраструктуры
 
@@ -162,6 +197,11 @@ mvn -pl collector spring-boot:run   # порт 8081, /actuator/prometheus
 cd analyzer && poetry run analyzer  # порт 8000, /metrics
 mvn -pl trader spring-boot:run      # порт 8082, /actuator/prometheus
 ```
+
+`collector.instruments` принимает `TICKER` или `TICKER@CLASS`: акции резолвятся в классе `TQBR`,
+фьючерсы — в `SPBFUT` (не `FORTS`), регистр тикера значим (`SiZ6`, а не `SIZ6`). Текущий набор MVP:
+`SBER`, `GAZP`, `SiZ6@SPBFUT`; у фьючерса есть экспирация — перед ней тикер нужно роллировать вручную.
+`TCSG` и короткий `BR` через T-Invest API не резолвятся.
 
 ### Тесты
 ```bash
