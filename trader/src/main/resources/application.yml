@@ -33,6 +33,7 @@ kafka:
 tinkoff:
   token: ${T_INVEST_TOKEN:}
   sandbox: ${T_INVEST_SANDBOX:true}
+  account-id: ${T_INVEST_ACCOUNT_ID:}
 
 trader:
   deposit: 200000

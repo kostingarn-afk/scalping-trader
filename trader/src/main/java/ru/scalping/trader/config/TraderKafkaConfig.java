@@ -31,8 +31,15 @@ public class TraderKafkaConfig {
         return new JdbcTemplate(dataSource);
     }
 
+    /**
+     * Consumer сигналов из {@code trading-signals}.
+     *
+     * <p>Имя бина отличается от класса {@code SignalConsumer}: компонент
+     * {@code signal.SignalConsumer} получает одноимённое имя бина по умолчанию,
+     * и Spring падает при старте с конфликтом определений.
+     */
     @Bean(destroyMethod = "close")
-    public KafkaConsumer<String, byte[]> signalConsumer() {
+    public KafkaConsumer<String, byte[]> tradingSignalsConsumer() {
         Map<String, Object> props = new HashMap<>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);

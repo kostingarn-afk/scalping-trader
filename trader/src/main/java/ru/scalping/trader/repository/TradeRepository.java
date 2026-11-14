@@ -67,6 +67,23 @@ public class TradeRepository {
         jdbc.update("DELETE FROM positions WHERE instrument_id=?", figi);
     }
 
+    /**
+     * Причина отказа биржи. {@link #insertTrade} не принимает {@code reject_reason},
+     * а менять его сигнатуру нельзя — причина пишется отдельным UPDATE.
+     */
+    public void updateRejectReason(UUID tradeId, String reason) {
+        jdbc.update("UPDATE trade_results SET reject_reason = ? WHERE trade_id = ?",
+                truncate(reason, 256), tradeId);
+    }
+
+    /** Длина колонки {@code reject_reason} — VARCHAR(256). */
+    private static String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
+    }
+
     public Map<String, String> loadRiskConfig() {
         return jdbc.query("SELECT key, value FROM risk_config",
                 rs -> {
@@ -74,5 +91,20 @@ public class TradeRepository {
                     while (rs.next()) m.put(rs.getString("key"), rs.getString("value"));
                     return m;
                 });
+    }
+
+    /**
+     * Лотность инструмента из справочника (владелец записи — Collector).
+     *
+     * @return {@code instruments.lot} либо {@code 1}, если записи нет или значение не задано
+     */
+    public int lotSize(String figi) {
+        List<Integer> lots = jdbc.query("SELECT lot FROM instruments WHERE figi = ?",
+                (rs, rowNum) -> rs.getObject("lot", Integer.class),
+                figi);
+        if (lots.isEmpty() || lots.get(0) == null || lots.get(0) < 1) {
+            return 1;
+        }
+        return lots.get(0);
     }
 }

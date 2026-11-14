@@ -25,17 +25,24 @@ public class SignalDeduplicator {
     }
 
     /**
-     * @return true если сигнал новый (обрабатываем), false если дубликат.
+     * @return true если сигнал новый (обрабатываем), false если дубликат или БД недоступна
+     *         (необработанный сигнал лучше потерять, чем исполнить дважды).
      */
     public boolean tryAcquire(UUID signalId) {
         try {
-            jdbc.update(
+            // ON CONFLICT DO NOTHING не бросает исключение, поэтому конфликт определяется
+            // по числу вставленных строк: 1 — сигнал новый, 0 — уже обработан.
+            int rows = jdbc.update(
                     "INSERT INTO processed_signals (signal_id, result) VALUES (?, 'executed') ON CONFLICT DO NOTHING",
                     signalId
             );
-            return true;
+            if (rows == 1) {
+                return true;
+            }
+            log.warn("Duplicate signal_id={}", signalId);
+            return false;
         } catch (Exception e) {
-            log.debug("Duplicate signal_id={}", signalId);
+            log.warn("Failed to acquire signal_id={}: {}", signalId, e.getMessage());
             return false;
         }
     }

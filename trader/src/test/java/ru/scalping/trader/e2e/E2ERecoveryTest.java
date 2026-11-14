@@ -7,6 +7,7 @@ import ru.scalping.trader.position.PositionStore;
 import ru.scalping.trader.recovery.ExchangeStateProvider;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
@@ -29,7 +30,17 @@ class E2ERecoveryTest {
                 99.0, 101.0, "sl-1", "tp-1"
         );
 
-        ExchangeStateProvider provider = () -> List.of(exchangePosition);
+        ExchangeStateProvider provider = new ExchangeStateProvider() {
+            @Override
+            public Collection<Position> loadOpenPositions() {
+                return List.of(exchangePosition);
+            }
+
+            @Override
+            public int tradingStatus(String figi) {
+                return 2;
+            }
+        };
         PositionStore store = new PositionStore();
 
         // Recovery
