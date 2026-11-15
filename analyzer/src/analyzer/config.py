@@ -15,7 +15,9 @@ class AnalyzerConfig:
     topic_raw: str = "raw-market-data"
     topic_signals: str = "trading-signals"
     num_processes: int = 2
-    instruments: List[str] = field(default_factory=lambda: ["SBER", "GAZP", "SiZ6"])
+    instruments: List[str] = field(
+        default_factory=lambda: ["GAZP", "VTBR", "ROSN", "NVTK", "PLZL"]
+    )
     strategy_id: str = "mean_reversion_bb"
     analyzer_version: str = "0.1.0"
     signal_ttl_seconds: int = 30
