@@ -55,6 +55,7 @@ T-Invest API (gRPC)
 │   ├── prometheus/                # prometheus.yml + rules/scalping-alerts.yml
 │   └── grafana/dashboards/        # scalping-mvp.json
 ├── openspec/                      # OpenSpec: proposal, specs, design, tasks
+├── data/history/                  # выгрузки истории Collector'а для бэктеста (вне git)
 └── pom.xml                        # Maven multi-module (collector + trader)
 ```
 
@@ -68,6 +69,7 @@ T-Invest API (gRPC)
 | [`docs/T-Invest API.md`](docs/T-Invest%20API.md) | Описание T-Invest API (gRPC-стримы, ордера, стопы) |
 | [`docs/Математические библиотеки для анализа.md`](docs/Математические%20библиотеки%20для%20анализа.md) | ta-lib, numpy, scipy — индикаторы и стратегии |
 | [`docs/recommendation.md`](docs/recommendation.md) | Рекомендации по работе с депозитом (лимиты, комиссии, стопы) |
+| [`docs/Выбор-инструментов.md`](docs/Выбор-инструментов.md) | Почему торговый список — пять акций (`GAZP`, `VTBR`, `ROSN`, `NVTK`, `PLZL`) и почему убраны Сбер, «Т-Технологии» и фьючерс: расшифровка ATR и тикеров, критерий отбора, ограничения замера |
 | [`docs/Qwen__20261107_nt05xsewk.txt`](docs/Qwen__20261107_nt05xsewk.txt) | Архитектура упрощённая (блок-схема) |
 | [`docs/Qwen__20261107_pdsk2v2hz.txt`](docs/Qwen__20261107_pdsk2v2hz.txt) | Архитектура подробная (блок-схема) |
 
@@ -202,6 +204,144 @@ mvn -pl trader spring-boot:run      # порт 8082, /actuator/prometheus
 фьючерсы — в `SPBFUT` (не `FORTS`), регистр тикера значим (`SiZ6`, а не `SIZ6`). Текущий набор MVP:
 `SBER`, `GAZP`, `SiZ6@SPBFUT`; у фьючерса есть экспирация — перед ней тикер нужно роллировать вручную.
 `TCSG` и короткий `BR` через T-Invest API не резолвятся.
+
+### Выгрузка истории (Collector)
+
+Историю для бэктеста выгружает **только Collector** — Analyzer и Trader к брокерскому API
+не обращаются. Режим включается профилем `history-dump`: стрим, Kafka и запись справочника
+в БД не запускаются, приложение пишет CSV и завершается.
+
+```bash
+# WSL/Linux: нужен truststore с корнем Минцифры (см. раздел выше) и T_INVEST_TOKEN
+mvn -pl collector spring-boot:run \
+  -Dspring-boot.run.profiles=history-dump \
+  -Dspring-boot.run.arguments="--collector.history.instruments=SBER,GAZP,SiZ6@SPBFUT \
+    --collector.history.interval=1min \
+    --collector.history.from=2026-10-01T00:00:00Z \
+    --collector.history.to=2026-11-01T00:00:00Z"
+```
+
+| Параметр | Значение |
+|---|---|
+| `collector.history.instruments` | `TICKER` или `TICKER@CLASS` через запятую |
+| `collector.history.interval` | `1min`, `5min`, `15min`, `1h` |
+| `collector.history.from` / `to` | ISO-8601 UTC; период режется на страницы по лимиту `GetCandles` (1 мин — сутки, 5 мин — неделя) |
+| `collector.history.out-dir` | каталог выгрузки, по умолчанию `../data/history` относительно каталога модуля `collector`, т.е. `<repo>/data/history` (env `HISTORY_OUT_DIR`) |
+
+Коды возврата: `0` — все инструменты выгружены, `2` — часть вернула пустую историю, `3` — пусто
+у всех, `1` — ошибка. Свечи на стыках страниц дедуплицируются по времени закрытия; незавершённые
+свечи отбрасываются. Если внутри периода у инструмента нет баров за целый календарный день (UTC),
+выгрузка пишет `WARN History gaps ...` со списком таких дней — пропуск в источнике не теряется молча.
+
+### Бэктест (оценка стратегии на истории)
+
+Сырые данные T-Invest получает только Collector: подписки стрима и исторические запросы
+`MarketDataService.GetCandles`. Выгрузка истории складывается в `data/history/` —
+`{ticker}_{interval}min.csv` (`ts,open,high,low,close,volume`, ISO-8601 UTC) плюс рядом
+`.meta.json` (`ticker`, `class_code`, `lot_size`, `interval_minutes`). Analyzer к брокерскому
+API не обращается и токен не использует — работает с CSV.
+
+Прогон стратегии на уже выгруженной истории (сеть и токен не нужны):
+
+```bash
+cd analyzer
+poetry install            # или: python -m venv .venv && .venv/Scripts/python.exe -m pip install -e .
+export PYTHONPATH=src     # если пакет не установлен; в PowerShell: $env:PYTHONPATH = "src"
+poetry run analyzer-backtest --data-dir ../data/history \
+  --intervals 1,5,15 --tariffs investor \
+  --out ../reports/backtest-$(date +%F).md
+```
+
+Если `poetry` в системе нет, рабочий вариант — локальное окружение `analyzer/.venv`
+(в нём же лежат `pandas`, `statsmodels`, `scikit-learn`, `pytest`, `ruff`):
+
+```bash
+cd analyzer
+.venv/Scripts/python.exe -m analyzer.backtest.cli --data-dir ../data/history-1h \
+  --intervals 60 --tariffs trader --strategy momentum --out ../reports/run.md
+.venv/Scripts/python.exe -m pytest
+```
+
+Параметры прогона: `--deposit` (200 000 ₽), `--risk-pct` (1 % на сделку),
+`--max-notional-pct` (лимит номинала позиции, 100 % депозита), `--atr-sl` / `--atr-tp`
+(1.5 / 2.0 × ATR), `--tp-sl` (перебор пар `TP:SL`, например `2:1.5,3:2,4:2.5` — каждый вариант
+даёт отдельный прогон с меткой `tp3/sl2` в отчёте), `--max-bars` (таймаут 10 баров),
+`--cooldown-bars` (баров после выхода без новых входов), `--trailing-atr` (трейлинг-стоп в ATR
+от закрытия; 0 — выключен), `--no-tp` (цель не выставляется: выход по SL, трейлингу или таймауту;
+комиссионный фильтр при этом продолжает считать цель сигнала), `--null-seeds N` (прогнать N серий
+случайного входа с той же геометрией выхода и издержками и сравнить: отчёт получает раздел с
+p-value), `--fill-on-close` (вход по закрытию сигнального бара — воспроизводит замер `to_be.md` §3).
+
+Правило входа выбирается `--strategy`:
+
+| Значение | Логика |
+|---|---|
+| `mean_reversion` (по умолчанию) | production-правило: RSI(7) 30/70 + цена за полосой BB(20, 2σ) |
+| `v2` | порог `\|z\| ≥ --z-entry` σ, RSI `--rsi-buy/--rsi-sell`, запрет входа при `ADX ≥ --adx-max`, отсечение баров с `ATR%` ниже `--min-atr-pct` (или квантиля серии `--atr-pct-quantile`) |
+| `momentum` | вход в сторону отклонения `\|z\| ≥ --z-entry` при подтверждении RSI (`--rsi-buy` 65 / `--rsi-sell` 35) и `ADX ≥ --adx-min` |
+
+Боевой Analyzer продолжает работать на `mean_reversion`: `v2` и `momentum` подключены только
+в бэктесте до подтверждения преимущества (см. `to_do.md` §3).
+
+Walk-forward — подбор параметров на обучающем окне и оценка на следующем:
+
+```bash
+poetry run analyzer-backtest --data-dir ../data/history-1h --intervals 60 \
+  --tariffs investor,trader --strategy momentum \
+  --walkforward --wf-train-bars 2000 --wf-test-bars 580 --wf-min-trades 15 \
+  --wf-grid "z_entry=1,1.5,2" --out ../reports/walkforward.md
+```
+
+`--wf-grid` задаёт декартово произведение осей (`name=v1,v2;name2=v3`), имена — поля конфига
+стратегии. На `train` выбирается конфигурация с максимальным net при `--wf-min-trades` сделках,
+на `test` она запускается без подгонки; бары хвоста `train` используются как прогрев
+индикаторов, их сделки в результат не входят. Отчёт содержит по каждому окну выбранные
+параметры, net и гейт `gross/комиссия`, а также строку `OOS` — сводку по всем тестовым окнам.
+
+Отчёт: `.md` — сводка по каждому прогону (сигналы, сделки, win rate, expectancy, просадка,
+распределение выходов TP/SL/TIMEOUT, признак «Открыта» для позиции на конец выгрузки);
+при переборе TP/SL в конце добавляется таблица лучших прогонов с отношением
+`Gross/комиссия` (порог кандидата — ≥ 1). `.json` — та же сводка для обработки, `.csv` — все сделки. Модель издержек — по тарифу, раздельно для
+бумаг и фьючерсов (признак фьючерса — класс `SPBFUT`/`FORTS`). Обоснования решений —
+`openspec/changes/backtest-runner/design.md`.
+
+Нулевая модель (`--null-seeds N`) отвечает на вопрос, есть ли в правиле входа информация
+вообще: тот же движок, тот же комиссионный фильтр, та же геометрия выхода, но входы случайны
+(направление 50/50, частота — как у фактического прогона). Сравнение идёт по net **на сделку**,
+потому что число сделок в случайных прогонах отличается из-за занятости позиции. `p ≤ 0.05` —
+правило приносит то, чего случайный вход с теми же выходами не даёт; `p > 0.20` — сигнал
+неотличим от шума, и улучшать нужно выход, издержки или горизонт, а не порог входа.
+Практика: `--null-seeds 200` на три инструмента считается примерно за минуту.
+
+Панельный режим (`--panel`) — кросс-секционный momentum вместо правила «входить или нет»:
+на каждой дате ребаланса вселенная ранжируется по доходности за `--panel-lookback` торговых
+дней, `--panel-legs` имён из верхушки покупаются и столько же из низа продаются, книга
+долларово-нейтральна. Стопы не ставятся — для нейтральной книги они искажают сигнал, а не
+защищают его. Позиции удерживаются `--panel-rebalance` дней, издержки платят только изменившиеся
+ноги; ставка берётся из `--tariffs`.
+
+```bash
+analyzer-backtest --data-dir ../data/history-1h --tariffs trader --panel \
+  --panel-universe "GAZP,LKOH,VTBR,ROSN,NVTK,PLZL,YDEX,GMKN,TATN,AFLT,SNGSP,ALRS,CHMF,NLMK,SNGS,IRAO" \
+  --panel-grid "lookback_days=5,10,20;rebalance_days=5,10;legs=3,4" \
+  --panel-null-seeds 100 --out ../reports/panel-grid.md
+```
+
+`--panel-grid` — та же сетка, что у walk-forward; `--panel-null-seeds` перемешивает ранжирование
+внутри каждого ребаланса (состав периода и оборот те же, информация уничтожена); `--panel-walkforward`
+с `--panel-train-days` / `--panel-test-days` выбирает конфигурацию на train по датам и оценивает на
+следующем блоке. `--panel-universe` обязателен на практике: вселенная — исследовательское решение
+(фьючерсы и бумаги с ATR ниже издержек отсеиваются заранее), и оно должно быть видно в команде.
+
+Чего панель не учитывает: стоимость заимствования бумаг и требования по ГО для шорта, делистинг
+(вселенная собрана из сегодняшних ликвидных имён), внутрипериодные движения (PnL от закрытия до
+закрытия), проскальзывание сверх комиссии.
+
+Что модель **не** учитывает (см. `design.md` D9): проскальзывание и очередь в стакане,
+абонентскую плату тарифа, ступени ставок по обороту, минимальную комиссию брокера
+(`min_commission_rub`, по умолчанию 0) и внутрисделочную просадку. Для фьючерсов лимит
+номинала считается по полной стоимости контракта, а не по ГО — это консервативнее реальных
+ограничений брокера. Цифры прогона — верхняя граница оценки, а не обещание доходности.
 
 ### Тесты
 ```bash

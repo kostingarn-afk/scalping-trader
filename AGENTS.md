@@ -7,7 +7,8 @@
 ## 1. Project Overview
 
 Автоматизированная система скальпинга на Московской бирже через [T-Invest API](https://developer.tbank.ru/).
-Депозит 200 000 ₽, MVP — 3 инструмента (BR, SBER, TCSG). Pipeline:
+Депозит 200 000 ₽, MVP — 5 инструментов (GAZP, VTBR, ROSN, NVTK, PLZL; отбор и обоснование —
+[`docs/Выбор-инструментов.md`](docs/Выбор-инструментов.md)). Pipeline:
 Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстким риск-контролем и биржевыми SL/TP.
 
 Полное ТЗ — [`docs/Техническое задание.md`](docs/Техническое%20задание.md). Архитектурные решения —
@@ -57,6 +58,8 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 **Analyzer** (`analyzer/src/analyzer/`):
 - `config.py`, `indicators.py`, `strategy.py`, `commission_filter.py`
 - `consumer.py` (multi-process), `signal_publisher.py`, `repository.py`, `metrics.py`, `main.py`
+- `backtest/` — офлайн-прогон стратегии на выгруженной истории: `models.py`, `commission.py`,
+  `loader.py` (CSV-контракт Collector'а), `engine.py`, `report.py`, `cli.py` (`analyzer-backtest`)
 
 **Trader** (`trader/src/main/java/ru/scalping/trader/`):
 - `risk/` — `RiskConfig`, `RiskManager`, `RiskCheckResult`, `PnlCircuitBreaker`
@@ -71,6 +74,10 @@ Collector → Kafka → Analyzer → Kafka → Trader → Kafka с жёстки�
 
 ### Правила слоёв
 
+- **Сырые данные T-Invest — только через Collector.** Подписки (`MarketDataStreamService`) и
+  исторические запросы (`MarketDataService.GetCandles`) выполняет Collector; Analyzer и Trader
+  получают данные через Kafka или через выгрузки Collector'а (CSV + `.meta.json`). Analyzer
+  не подключается к брокерскому API и не держит токен T-Invest.
 - **Интерфейсы SDK** (`MarketStreamService`, `InstrumentLoader`, `OrderExecutionService`,
   `ExchangeStateProvider`) — абстракции; реализация привязки к T-Invest SDK подставляется через Spring-профиль.
   Бизнес-логика не импортирует типы SDK напрямую.
@@ -122,6 +129,10 @@ mvn test                                       # Collector + Trader (unit; гр�
 mvn test -Dgroups=e2e                          # только e2e-тег (тег информационный; нужны sandbox и env T_INVEST_TOKEN)
 mvn -pl collector spring-boot:run              # запуск Collector (порт 8081)
 mvn -pl trader spring-boot:run                 # запуск Trader (порт 8082)
+# Выгрузка истории для бэктеста: профиль history-dump, стрим и БД не запускаются
+mvn -pl collector spring-boot:run -Dspring-boot.run.profiles=history-dump \
+  -Dspring-boot.run.arguments="--collector.history.instruments=SBER --collector.history.interval=1min \
+  --collector.history.from=2026-10-01T00:00:00Z --collector.history.to=2026-11-01T00:00:00Z"
 # Flyway: миграции применяются автоматически при старте Trader; flyway-maven-plugin не настроен
 ```
 
