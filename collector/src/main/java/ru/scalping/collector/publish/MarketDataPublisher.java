@@ -5,6 +5,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import ru.scalping.collector.metrics.CollectorMetrics;
 import ru.scalping.proto.RawMarketData;
@@ -12,8 +13,12 @@ import ru.scalping.proto.RawMarketData;
 /**
  * Публикация {@link RawMarketData} в Kafka-топик {@code raw-market-data}.
  * Ключ — figi (для partitioning по инструменту).
+ *
+ * <p>Не активен в профиле {@code history-dump}: режим выгрузки истории не использует Kafka,
+ * а {@code KafkaProducer} в этом профиле не создаётся.
  */
 @Component
+@Profile("!history-dump")
 public class MarketDataPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(MarketDataPublisher.class);

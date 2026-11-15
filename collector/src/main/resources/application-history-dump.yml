@@ -1,0 +1,17 @@
+# Профиль выгрузки истории для бэктеста: `--spring.profiles.active=history-dump`.
+# Веб-сервер, стрим и запись метаданных в БД не нужны — приложение пишет CSV и завершается.
+spring:
+  main:
+    web-application-type: none
+  datasource:
+    hikari:
+      # Выгрузка не работает с БД: пул не должен (и не может) проверять соединение при старте —
+      # иначе dump падал бы без запущенного PostgreSQL. Соединение создаётся только по запросу.
+      initialization-fail-timeout: -1
+
+collector:
+  history:
+    # Боевой запуск Collector'а идёт из каталога модуля (`mvn -pl collector`), поэтому `..`
+    # поднимает выгрузку в `<repo>/data/history` — туда же, куда смотрит Analyzer
+    # (`analyzer-backtest --data-dir ../data/history`).
+    out-dir: ${HISTORY_OUT_DIR:../data/history}

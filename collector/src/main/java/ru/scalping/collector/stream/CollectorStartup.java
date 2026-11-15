@@ -3,6 +3,7 @@ package ru.scalping.collector.stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.annotation.Profile;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import ru.scalping.collector.instrument.InstrumentCache;
@@ -11,8 +12,12 @@ import ru.scalping.collector.instrument.InstrumentCache;
  * Старт Collector после поднятия Spring-контекста:
  * 1) загрузка метаданных инструментов (задача 2.3);
  * 2) открытие gRPC-стрима (задача 2.2).
+ *
+ * <p>В профиле {@code history-dump} не активен: режим выгрузки истории не открывает стрим
+ * и не пишет справочник в БД.
  */
 @Component
+@Profile("!history-dump")
 public class CollectorStartup {
 
     private static final Logger log = LoggerFactory.getLogger(CollectorStartup.class);

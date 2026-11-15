@@ -2,6 +2,7 @@ package ru.scalping.collector.stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import ru.scalping.collector.config.CollectorProperties;
 import ru.scalping.collector.instrument.InstrumentCache;
@@ -18,8 +19,11 @@ import java.util.List;
  * <p>При старте открывает стрим, выставляет 4 типа подписок на каждый инструмент,
  * направляет события в publisher с учётом фильтрации по торговому статусу.
  * При разрыве — переподключение с exponential backoff (1с→30с потолок).
+ *
+ * <p>Не активен в профиле {@code history-dump}: стрим и Kafka в этом режиме не запускаются.
  */
 @Component
+@Profile("!history-dump")
 public class StreamSubscriptionManager {
 
     private static final Logger log = LoggerFactory.getLogger(StreamSubscriptionManager.class);
