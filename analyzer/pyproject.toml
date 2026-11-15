@@ -9,13 +9,20 @@ packages = [{include = "analyzer", from = "src"}]
 python = "^3.11"
 numpy = "^1.26"
 scipy = "^1.13"
-TA-Lib = "^0.4.32"
+TA-Lib = "^0.8.32"
 kafka-python = "^2.0"
 asyncpg = "^0.29"
 prometheus-client = "^0.20"
 protobuf = "^4.25"
 pyyaml = "^6.0"
 uvloop = {version = "^0.19", markers = "sys_platform != 'win32'"}
+# Исследовательский контур бэктеста (`analyzer-backtest`): панельные данные, HAC-статистика,
+# baseline-модели. Production-путь (`consumer`, `indicators`, `strategy`) их не импортирует;
+# держим в основных зависимостях, потому что `analyzer-backtest` — объявленная точка входа
+# пакета, и опциональная группа сделала бы её падающей при обычном `poetry install`.
+pandas = "^2.2"
+statsmodels = "^0.14"
+scikit-learn = "^1.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2"
@@ -26,6 +33,7 @@ ruff = "^0.5"
 
 [tool.poetry.scripts]
 analyzer = "analyzer.main:main"
+analyzer-backtest = "analyzer.backtest.cli:main"
 
 [build-system]
 requires = ["poetry-core"]
@@ -34,6 +42,9 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Пакет лежит в src/ и может не быть установлен (poetry в окружении владельца может отсутствовать):
+# без этого пути `pytest` не находит `analyzer` и падает на сборке тестов.
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100

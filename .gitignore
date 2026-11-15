@@ -39,6 +39,10 @@ htmlcov/
 *_pb2_grpc.py
 *_pb2.pyi
 
+# Бэктест: кэш исторических выгрузок Collector'а (данные, не код)
+data/
+reports/
+
 # IDE
 .idea/
 *.iml
