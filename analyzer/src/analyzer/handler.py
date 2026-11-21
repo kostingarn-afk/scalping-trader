@@ -3,8 +3,9 @@
 Создаётся внутри каждого процесса-консьюмера (см. `consumer.start_workers`):
 asyncio-loop и пул asyncpg нельзя наследовать от родительского процесса.
 
-Поток данных: Protobuf `RawMarketData` → завершённые свечи → скользящее окно по figi
-→ `AnalyzerPipeline.process` (индикаторы → стратегия → фильтр → БД → Kafka).
+Поток данных: Protobuf `RawMarketData` → состояние микроструктуры (стакан, сделки) →
+завершённые свечи → скользящее окно по figi → `AnalyzerPipeline.process`
+(индикаторы → стратегия → фильтр → БД → Kafka).
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import numpy as np
 
 from . import proto_loader
 from .config import AnalyzerConfig
+from .microstructure import BUY, SELL, UNKNOWN, MicrostructureState
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,11 @@ CANDLE_WINDOW = 200
 
 Candle = Dict[str, Any]
 ParsedCandle = Tuple[str, Candle]
+# (figi, вид payload, данные): вид — "candle", "book" или "trade".
+ParsedMessage = Tuple[str, str, Dict[str, Any]]
+
+# TradeDirection из common.proto: 0 unspecified, 1 buy, 2 sell.
+_DIRECTIONS = {1: BUY, 2: SELL}
 
 
 def _to_float(quotation: Any) -> float:
@@ -34,11 +41,10 @@ def _to_float(quotation: Any) -> float:
     return quotation.units + quotation.nano / 1e9
 
 
-def parse_candle(payload: bytes) -> Optional[ParsedCandle]:
-    """Разбор `RawMarketData`.
+def parse_message(payload: bytes) -> Optional[ParsedMessage]:
+    """Разобрать `RawMarketData` в свечу, стакан или сделку.
 
-    @return (figi, свеча) для завершённой свечи; None для прочих payload'ов,
-            незавершённых свечей и битых сообщений.
+    @return (figi, вид, данные) или None для незавершённых свечей, пустых и битых сообщений.
     """
     pb = proto_loader.raw_market_data_pb2
     if pb is None or not payload:
@@ -51,24 +57,49 @@ def parse_candle(payload: bytes) -> Optional[ParsedCandle]:
         logger.warning("Failed to parse RawMarketData (%d bytes)", len(payload))
         return None
 
-    # oneof payload: payload_type не различает CANDLE и отсутствие payload (оба = 0)
-    if not message.HasField("candle"):
-        return None
+    # oneof payload: payload_type не различает CANDLE и отсутствие payload (оба = 0),
+    # поэтому вид определяется по HasField, а не по enum.
+    if message.HasField("candle"):
+        candle = message.candle
+        if not candle.is_complete:
+            return None
+        candle_ts: Optional[datetime] = (
+            candle.end.ToDatetime(tzinfo=timezone.utc)
+            if candle.HasField("end")
+            else None
+        )
+        return message.figi, "candle", {
+            "candle_ts": candle_ts,
+            "close": _to_float(candle.close),
+            "high": _to_float(candle.high),
+            "low": _to_float(candle.low),
+            "volume": int(candle.volume),
+        }
 
-    candle = message.candle
-    if not candle.is_complete:
-        return None
+    if message.HasField("order_book"):
+        book = message.order_book
+        return message.figi, "book", {
+            "bids_qty": [int(item.quantity) for item in book.bids],
+            "asks_qty": [int(item.quantity) for item in book.asks],
+        }
 
-    candle_ts: Optional[datetime] = (
-        candle.end.ToDatetime(tzinfo=timezone.utc) if candle.HasField("end") else None
-    )
-    return message.figi, {
-        "candle_ts": candle_ts,
-        "close": _to_float(candle.close),
-        "high": _to_float(candle.high),
-        "low": _to_float(candle.low),
-        "volume": int(candle.volume),
-    }
+    if message.HasField("trade"):
+        trade = message.trade
+        return message.figi, "trade", {
+            "price": _to_float(trade.price),
+            "volume": int(trade.quantity),
+            "direction": _DIRECTIONS.get(int(trade.direction), UNKNOWN),
+        }
+
+    return None
+
+
+def parse_candle(payload: bytes) -> Optional[ParsedCandle]:
+    """Совместимая обёртка: только завершённые свечи, остальное — None."""
+    parsed = parse_message(payload)
+    if parsed is None or parsed[1] != "candle":
+        return None
+    return parsed[0], parsed[2]
 
 
 class CandleWindow:
@@ -120,17 +151,35 @@ def make_handler(config: AnalyzerConfig) -> Callable[[Any], None]:
     pipeline = AnalyzerPipeline(config)
     loop.run_until_complete(pipeline.start())
     window = CandleWindow()
+    microstructure = MicrostructureState(
+        depth=config.order_book_depth,
+        bucket_volume=config.vpin_bucket_volume,
+        buckets=config.vpin_buckets,
+    )
 
     def handler(message: Any) -> None:
-        parsed = parse_candle(message.value)
+        parsed = parse_message(message.value)
         if parsed is None:
             return
-        figi, candle = parsed
-        data = window.add(figi, candle)
-        if data is None:
+        figi, kind, data = parsed
+
+        # Стакан и сделки обновляют состояние, но не запускают анализ: сигнал рождается на
+        # завершённой свече, иначе он обновлялся бы на каждое сообщение стакана.
+        if kind == "book":
+            microstructure.update_book(figi, data["bids_qty"], data["asks_qty"])
             return
+        if kind == "trade":
+            microstructure.on_trade(
+                figi, data["price"], data["volume"], data["direction"]
+            )
+            return
+
+        window_data = window.add(figi, data)
+        if window_data is None:
+            return
+        window_data.update(microstructure.snapshot(figi))
         try:
-            loop.run_until_complete(pipeline.process(figi, data))
+            loop.run_until_complete(pipeline.process(figi, window_data))
         except Exception:
             # Kafka-consumer коммитит offset только при отсутствии исключения,
             # поэтому ошибка обработки не должна валить весь процесс-консьюмер.

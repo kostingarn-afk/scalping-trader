@@ -29,6 +29,19 @@ class AnalyzerConfig:
     # Сжатие producer'а trading-signals. gzip — из stdlib; lz4 требует пакета `lz4`,
     # без него kafka-python падает с AssertionError при создании producer.
     compression_type: Optional[str] = "gzip"
+    # Микроструктура (шаг 1.3): глубина стакана из Collector и параметры VPIN.
+    # Бакет — объём в лотах; VPIN считается по последним `vpin_buckets` завершённым бакетам.
+    order_book_depth: int = 10
+    vpin_bucket_volume: int = 1000
+    vpin_buckets: int = 20
+
+    def __post_init__(self) -> None:
+        if self.order_book_depth <= 0:
+            raise ValueError("order_book_depth must be positive")
+        if self.vpin_bucket_volume <= 0:
+            raise ValueError("vpin_bucket_volume must be positive")
+        if self.vpin_buckets <= 0:
+            raise ValueError("vpin_buckets must be positive")
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "AnalyzerConfig":

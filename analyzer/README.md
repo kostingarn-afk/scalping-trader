@@ -13,7 +13,8 @@ Analyzer — единственное место, где живёт правил
 
 - подписки на стримы и `MarketDataService.GetCandles` — ответственность Collector'а (`../AGENTS.md` §3); Analyzer получает Kafka-сообщения или CSV-выгрузку;
 - во всём пакете нет ни `tinkoff`, ни `T_INVEST_TOKEN`, ни чтения env (проверено по коду) — поэтому бэктест воспроизводим на машине без доступа к API;
-- историю для бэктеста выгружает Collector, Analyzer читает файлы (контракт — §11.1).
+- историю для бэктеста выгружает Collector, Analyzer читает файлы (контракт — §11.1);
+- из `raw-market-data` Analyzer потребляет свечи, **стакан** и **сделки**: по стакану считается `order_imbalance`, по потоку сделок — `vpin` (§5); без стакана оба поля пусты.
 
 Полное ТЗ — [`../docs/Техническое задание.md`](../docs/Техническое%20задание.md), обзор проекта и инфраструктура — [`../README.md`](../README.md).
 
@@ -101,9 +102,20 @@ Mean reversion на процессе Орнштейна–Уленбека (`doc
 - `σ` берётся из остатка AR(1) с поправкой `√(2θ/(1−b²))`, `σ_eq = σ/√(2θ)`;
 - SL/TP — те же множители ATR, что у остальных правил: сравнение идёт на одинаковом выходе.
 
-**Боевой Analyzer работает на `mean_reversion`.** `v2`, `momentum` и `ou` подключены только к
-`analyzer-backtest`; включение в живой контур — отдельный шаг после подтверждения преимущества
-(docstring модулей).
+### `microstructure` (`signal_models/microstructure.py`) — production-данные
+
+Вход по дисбалансу стакана: **BUY** при `order_imbalance ≥ obi_entry`, **SELL** при
+`order_imbalance ≤ −obi_entry`, при условии `vpin ≤ vpin_max`. Нет стакана, нет сделок,
+`vpin` выше потолка или ATR ≤ 0 — HOLD с причиной.
+
+Параметры: `--model-param obi_entry=0.2`, `vpin_max=0.5`.
+
+**В бэктесте модель всегда HOLD:** CSV-выгрузка Collector содержит только свечи, стакана в
+истории нет. Проверка — unit-тесты на индикаторах и production-путь после запуска Collector.
+
+**Боевой Analyzer работает на `mean_reversion`.** `v2`, `momentum`, `ou` и `microstructure`
+подключены только к `analyzer-backtest` или к production-индикаторам; включение модели в живой
+контур — отдельный шаг после подтверждения преимущества (docstring модулей).
 
 ### Реестр моделей (`signal_models/`)
 
@@ -315,7 +327,7 @@ Train фиксированной длины, test — следующий бло�
 | `--max-notional-pct` | `100.0` | лимит номинала позиции, % депозита |
 | `--atr-sl` / `--atr-tp` | `1.5` / `2.0` | множители ATR для SL и TP |
 | `--tp-sl` | `` | перебор пар `TP:SL` (`2:1.5,3:2`), метка `tp3/sl2` |
-| `--strategy` | `mean_reversion` | `mean_reversion` / `v2` / `momentum` / `ou` (из реестра `signal_models`) |
+| `--strategy` | `mean_reversion` | `mean_reversion` / `v2` / `momentum` / `ou` / `microstructure` (из реестра `signal_models`) |
 | `--model-param` | — | параметры модели `key=value`, повторяемый (например `window=240` для `ou`) |
 | `--z-entry` | `2.0` | порог `\|z\|` в σ BB (v2, momentum) |
 | `--rsi-buy` / `--rsi-sell` | — | v2: 25/75, momentum: 65/35 (перекрывают дефолты стратегии) |

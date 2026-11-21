@@ -91,8 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=model_names(),
         default="mean_reversion",
         help=(
-            "модель входа из реестра signal_models: production mean_reversion, "
-            "momentum (продолжение движения) или v2 (mean reversion с фильтрами)"
+            "модель входа из реестра signal_models: "
+            + ", ".join(model_names())
         ),
     )
     parser.add_argument("--z-entry", type=float, default=2.0, help="порог |z| в σ BB (v2, momentum)")

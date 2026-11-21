@@ -30,6 +30,8 @@ class Indicators:
     adx: Optional[float] = None
     # ATR в процентах цены: волатильность бара, сопоставимая с издержками.
     atr_pct: Optional[float] = None
+    # VPIN: доля дисбаланса объёмного потока (0 — сбалансирован, 1 — односторонний).
+    vpin: Optional[float] = None
 
     def to_dict(self) -> Dict[str, float]:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -141,6 +143,7 @@ def compute_all(
     volumes: np.ndarray,
     bids_qty: Optional[List[int]] = None,
     asks_qty: Optional[List[int]] = None,
+    vpin: Optional[float] = None,
 ) -> Indicators:
     """Расчёт всех индикаторов сразу."""
     rsi = compute_rsi(closes)
@@ -158,4 +161,5 @@ def compute_all(
         zscore=compute_zscore(close, bb_u, bb_m),
         adx=adx,
         atr_pct=compute_atr_pct(atr, close),
+        vpin=vpin,
     )

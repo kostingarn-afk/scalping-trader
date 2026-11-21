@@ -23,6 +23,7 @@ from .builtin import (
     v2_config,
 )
 from .ou import OuConfig, OuMeanReversionModel, ou_config
+from .microstructure import MicroConfig, MicrostructureModel, microstructure_config
 
 
 class UnknownModelError(KeyError):
@@ -75,6 +76,16 @@ MODEL_SPECS: Mapping[str, ModelSpec] = MappingProxyType(
                 config=OuConfig() if config is None else config
             ),
             make_config=ou_config,
+            label=config_label,
+        ),
+        "microstructure": ModelSpec(
+            name="microstructure",
+            version=MicrostructureModel.version,
+            config_cls=MicroConfig,
+            factory=lambda config: MicrostructureModel(
+                config=MicroConfig() if config is None else config
+            ),
+            make_config=microstructure_config,
             label=config_label,
         ),
     }

@@ -52,7 +52,15 @@ class AnalyzerPipeline:
             if any(v is None for v in (closes, highs, lows, volumes, price)) or len(closes) == 0:
                 return
 
-            ind = compute_all(closes, highs, lows, volumes)
+            ind = compute_all(
+                closes,
+                highs,
+                lows,
+                volumes,
+                bids_qty=candle_data.get("bids_qty"),
+                asks_qty=candle_data.get("asks_qty"),
+                vpin=candle_data.get("vpin"),
+            )
             signal = mean_reversion(ind, price)
 
             signal_id = str(uuid.uuid4())

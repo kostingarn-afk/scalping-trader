@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .base import BarLike, ModelSpec, SignalModel
 from .builtin import MeanReversionModel, MeanReversionV2Model, MomentumModel
+from .microstructure import MicroConfig, MicrostructureModel
 from .ou import OuConfig, OuMeanReversionModel, OuParams, estimate_ou
 from .registry import MODEL_SPECS, UnknownModelError, build_model, model_names
 
@@ -14,6 +15,8 @@ __all__ = [
     "BarLike",
     "MeanReversionModel",
     "MeanReversionV2Model",
+    "MicroConfig",
+    "MicrostructureModel",
     "ModelSpec",
     "MODEL_SPECS",
     "MomentumModel",
