@@ -85,6 +85,7 @@ application-*.local.properties
 
 # OpenCode / агентские артефакты
 .opencode/
+.agents/
 
 # Прочее
 *.tmp
