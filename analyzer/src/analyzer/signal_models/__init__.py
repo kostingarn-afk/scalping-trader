@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .base import BarLike, ModelSpec, SignalModel
 from .builtin import MeanReversionModel, MeanReversionV2Model, MomentumModel
+from .ou import OuConfig, OuMeanReversionModel, OuParams, estimate_ou
 from .registry import MODEL_SPECS, UnknownModelError, build_model, model_names
 
 __all__ = [
@@ -16,8 +17,12 @@ __all__ = [
     "ModelSpec",
     "MODEL_SPECS",
     "MomentumModel",
+    "OuConfig",
+    "OuMeanReversionModel",
+    "OuParams",
     "SignalModel",
     "UnknownModelError",
     "build_model",
+    "estimate_ou",
     "model_names",
 ]

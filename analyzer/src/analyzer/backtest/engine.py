@@ -188,6 +188,10 @@ def run_backtest(
             continue
 
         start = max(0, index + 1 - cfg.window)
+        # Окно модели шире окна индикаторов, когда у неё есть warmup; окно индикаторов
+        # не меняется — иначе ATR/ADX (рекурсивные сглаживания) сдвинули бы правила.
+        lookback = max(cfg.window, _warmup(strategy_fn))
+        _fit_model(strategy_fn, bar_list[max(0, index + 1 - lookback) : index + 1])
         indicators = compute_all(
             closes[start : index + 1],
             highs[start : index + 1],
@@ -306,6 +310,25 @@ def size_position(
     if lots < 1:
         return None
     return lots, lots * notional_per_lot
+
+
+def _warmup(strategy_fn: StrategyFn) -> int:
+    """Сколько баров модель просит на оценку параметров (0 — правило без оценки)."""
+    try:
+        return max(0, int(getattr(strategy_fn, "warmup", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fit_model(strategy_fn: StrategyFn, bars: Sequence[Bar]) -> None:
+    """Передать модели окно истории до предсказания.
+
+    Статистическая модель без этого остаётся необученной; правило реализует `fit` как no-op,
+    поэтому вызов безопасен для всех моделей реестра.
+    """
+    fit = getattr(strategy_fn, "fit", None)
+    if callable(fit):
+        fit(bars)
 
 
 def _update_trailing(position: _OpenPosition, bar: Bar, config: RunConfig) -> None:

@@ -22,6 +22,7 @@ from .builtin import (
     momentum_config,
     v2_config,
 )
+from .ou import OuConfig, OuMeanReversionModel, ou_config
 
 
 class UnknownModelError(KeyError):
@@ -64,6 +65,16 @@ MODEL_SPECS: Mapping[str, ModelSpec] = MappingProxyType(
                 config=StrategyV2Config() if config is None else config
             ),
             make_config=v2_config,
+            label=config_label,
+        ),
+        "ou": ModelSpec(
+            name="ou",
+            version=OuMeanReversionModel.version,
+            config_cls=OuConfig,
+            factory=lambda config: OuMeanReversionModel(
+                config=OuConfig() if config is None else config
+            ),
+            make_config=ou_config,
             label=config_label,
         ),
     }

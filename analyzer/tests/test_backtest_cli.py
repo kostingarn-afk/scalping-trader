@@ -217,6 +217,51 @@ def test_cli_runs_momentum_strategy(tmp_path: Path, capsys):
     assert "mom-z2" in out
 
 
+def test_cli_runs_ou_with_model_param(tmp_path: Path, capsys):
+    """`--strategy ou` берёт параметры модели из `--model-param`, метка содержит окно."""
+    _write_history(tmp_path, "SBER", "TQBR", 80)
+
+    code = main(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--intervals",
+            "1",
+            "--strategy",
+            "ou",
+            "--model-param",
+            "window=120",
+            "--model-param",
+            "min_bars=30",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Стратегия: **ou**" in out
+    assert "ou-z2-w120" in out
+
+
+def test_cli_rejects_unknown_model_param(tmp_path: Path, capsys):
+    _write_history(tmp_path, "SBER", "TQBR", 30)
+
+    code = main(
+        ["--data-dir", str(tmp_path), "--strategy", "ou", "--model-param", "foo=1"]
+    )
+
+    assert code == 2
+    assert "неизвестные параметры" in capsys.readouterr().err
+
+
+def test_cli_rejects_malformed_model_param(tmp_path: Path, capsys):
+    _write_history(tmp_path, "SBER", "TQBR", 30)
+
+    code = main(["--data-dir", str(tmp_path), "--model-param", "window"])
+
+    assert code == 2
+    assert "ожидается key=value" in capsys.readouterr().err
+
+
 def test_cli_walkforward_writes_report(tmp_path: Path, capsys):
     _write_history(tmp_path, "SBER", "TQBR", 120)
     out = tmp_path / "wf.md"

@@ -125,6 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="порог ATR%% как квантиль серии (например 80), если --min-atr-pct не задан",
     )
     parser.add_argument(
+        "--model-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "параметр модели из реестра, key=value; повторяемый "
+            "(например window=240 для ou). Неизвестный ключ — ошибка до прогона"
+        ),
+    )
+    parser.add_argument(
         "--cooldown-bars", type=int, default=0, help="баров после выхода без новых входов"
     )
     parser.add_argument(
@@ -255,6 +265,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         intervals = _parse_ints(args.intervals, "intervals")
         variants = _parse_variants(args.tp_sl, args.atr_tp, args.atr_sl)
         _validate_flags(args)
+        args.model_params = _parse_model_params(args.model_param)
         strategy_config = _strategy_config(args)
         panel = _panel_settings(args)
         config = RunConfig(
@@ -492,6 +503,40 @@ def _parse_tp_sl_pairs(value: str) -> List[Tuple[float, float]]:
     return pairs
 
 
+def _parse_model_params(values: Sequence[str]) -> Dict[str, object]:
+    """`--model-param key=value` → словарь: int, если целое, иначе float, иначе строка."""
+    params: Dict[str, object] = {}
+    for raw in values:
+        key, separator, value = raw.partition("=")
+        key = key.strip()
+        if not separator or not key or not value.strip():
+            raise ValueError(f"--model-param: ожидается key=value, получено {raw!r}")
+        params[key] = _numeric_value(value.strip())
+    return params
+
+
+def _numeric_value(value: str) -> object:
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def _with_atr_threshold(template, atr_threshold: float):
+    """Подставить порог ATR в конфиг, только если у модели есть это поле.
+
+    У статистических моделей (ou) порога `min_atr_pct` нет — безусловный `replace` падал бы
+    с TypeError и ломал walk-forward.
+    """
+    if not hasattr(template, "min_atr_pct"):
+        return template
+    return replace(template, min_atr_pct=atr_threshold)
+
+
 def _strategy_config(args: argparse.Namespace):
     """Конфиг модели из флагов запуска или None для правила без параметров.
 
@@ -514,7 +559,7 @@ def _strategy_for(
     spec = MODEL_SPECS[args.strategy]
     if template is None:
         return build_model(args.strategy), spec.label(None)
-    config = replace(template, min_atr_pct=atr_threshold)
+    config = _with_atr_threshold(template, atr_threshold)
     return build_model(args.strategy, config), spec.label(config)
 
 
@@ -591,7 +636,7 @@ def _wf_builder(args: argparse.Namespace, template, atr_threshold: float) -> Str
 
     def build(params: Dict[str, float]) -> Tuple[StrategyFn, str]:
         try:
-            config = replace(template, min_atr_pct=atr_threshold, **params)
+            config = replace(_with_atr_threshold(template, atr_threshold), **params)
         except TypeError as exc:
             raise ValueError(
                 f"wf-grid: неизвестный параметр для {args.strategy}: {exc}"
