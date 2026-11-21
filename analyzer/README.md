@@ -89,6 +89,26 @@ Mean reversion с фильтрами режима. Дефолты `StrategyV2Con
 
 **Боевой Analyzer работает на `mean_reversion`.** `v2` и `momentum` подключены только к `analyzer-backtest`; включение в живой контур — отдельный шаг после подтверждения преимущества (docstring обоих модулей).
 
+### Реестр моделей (`signal_models/`)
+
+Подключение модели к бэктесту идёт через реестр, а не через правку CLI:
+
+| Модуль | Роль |
+|---|---|
+| `signal_models/base.py` | протокол `SignalModel` (`name`, `version`, `params()`, `fit(history)`, `predict(ind, price, sl, tp)`) и структурный `BarLike` |
+| `signal_models/builtin.py` | адаптеры `MeanReversionModel`, `MomentumModel`, `MeanReversionV2Model` и разбор их параметров из флагов запуска |
+| `signal_models/registry.py` | `MODEL_SPECS`, `build_model(name, config)`, `model_names()`; неизвестное имя → `UnknownModelError` |
+
+Как добавить модель (шаги 1.2–1.5 плана):
+
+1. реализовать `SignalModel` (для правила без параметров `fit` — no-op, как в `builtin.py`);
+2. добавить `ModelSpec` в `MODEL_SPECS`;
+3. добавить golden-тест паритета, если модель заменяет существующее правило.
+
+`--strategy` в `analyzer-backtest` строится из `model_names()`, поэтому новая запись сразу
+доступна в CLI. Подстановки другой модели вместо неизвестной нет: опечатка в имени — ошибка до
+прогона (в `to_do.md` §3 это отмечено как дефект прежнего `_builder_for`).
+
 ## 6. Комиссионный фильтр
 
 `CommissionFilter` отбрасывает сигнал, если прибыль до TP не покрывает `ratio` круговых комиссий:

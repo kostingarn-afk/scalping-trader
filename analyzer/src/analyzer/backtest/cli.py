@@ -8,14 +8,11 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import replace
-from functools import partial
 from itertools import product
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ..strategy import mean_reversion
-from ..strategy_momentum import MomentumConfig, momentum
-from ..strategy_v2 import StrategyV2Config, mean_reversion_v2
+from ..signal_models import MODEL_SPECS, build_model, model_names
 from .commission import TARIFFS, CommissionModel
 from .engine import StrategyFn, atr_pct_quantile, run_backtest
 from .loader import HistoryDataset, aggregate, load_dataset, scan_dir
@@ -91,11 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--strategy",
-        choices=("mean_reversion", "momentum", "v2"),
+        choices=model_names(),
         default="mean_reversion",
         help=(
-            "правило входа: production mean_reversion, momentum (продолжение движения) "
-            "или v2 (mean reversion с фильтрами режима/волатильности)"
+            "модель входа из реестра signal_models: production mean_reversion, "
+            "momentum (продолжение движения) или v2 (mean reversion с фильтрами)"
         ),
     )
     parser.add_argument("--z-entry", type=float, default=2.0, help="порог |z| в σ BB (v2, momentum)")
@@ -314,7 +311,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except ValueError as exc:
                 print(f"ошибка: {exc}", file=sys.stderr)
                 return 2
-            strategy_fn, strategy_label = _strategy_for(strategy_config, atr_threshold)
+            strategy_fn, strategy_label = _strategy_for(args, strategy_config, atr_threshold)
             for tariff in tariffs:
                 for label, tp, sl in variants:
                     run_config = replace(config, atr_mult_tp=tp, atr_mult_sl=sl)
@@ -495,40 +492,12 @@ def _parse_tp_sl_pairs(value: str) -> List[Tuple[float, float]]:
     return pairs
 
 
-def _rsi_thresholds(args: argparse.Namespace) -> Tuple[float, float]:
-    """Пороги RSI по стратегии: v2 — уровни перепроданности, momentum — подтверждение силы."""
-    default_buy, default_sell = (65.0, 35.0) if args.strategy == "momentum" else (25.0, 75.0)
-    buy = default_buy if args.rsi_buy is None else args.rsi_buy
-    sell = default_sell if args.rsi_sell is None else args.rsi_sell
-    return buy, sell
-
-
 def _strategy_config(args: argparse.Namespace):
-    """Конфиг стратегии или None для production-правила. Проверка порогов — до прогонов."""
-    if args.strategy == "mean_reversion":
-        if args.min_atr_pct or args.atr_pct_quantile is not None:
-            raise ValueError(
-                "--min-atr-pct/--atr-pct-quantile применяются только с --strategy v2/momentum"
-            )
-        return None
-    if args.min_atr_pct and args.atr_pct_quantile is not None:
-        raise ValueError("задайте одно из двух: --min-atr-pct или --atr-pct-quantile")
-    rsi_buy, rsi_sell = _rsi_thresholds(args)
-    if args.strategy == "v2":
-        return StrategyV2Config(
-            z_entry=args.z_entry,
-            rsi_buy=rsi_buy,
-            rsi_sell=rsi_sell,
-            adx_max=args.adx_max,
-            min_atr_pct=args.min_atr_pct,
-        )
-    return MomentumConfig(
-        z_entry=args.z_entry,
-        rsi_buy=rsi_buy,
-        rsi_sell=rsi_sell,
-        adx_min=args.adx_min,
-        min_atr_pct=args.min_atr_pct,
-    )
+    """Конфиг модели из флагов запуска или None для правила без параметров.
+
+    Разбор и проверка порогов живут в реестре моделей: новая модель не требует правки CLI.
+    """
+    return MODEL_SPECS[args.strategy].make_config(args)
 
 
 def _atr_threshold(args: argparse.Namespace, bars: Sequence[Bar]) -> float:
@@ -539,21 +508,14 @@ def _atr_threshold(args: argparse.Namespace, bars: Sequence[Bar]) -> float:
 
 
 def _strategy_for(
-    template, atr_threshold: float
+    args: argparse.Namespace, template, atr_threshold: float
 ) -> Tuple[StrategyFn, str]:
-    """Собрать функцию стратегии и метку варианта для конкретного таймфрейма."""
+    """Модель и метка варианта для конкретного таймфрейма."""
+    spec = MODEL_SPECS[args.strategy]
     if template is None:
-        return mean_reversion, ""
+        return build_model(args.strategy), spec.label(None)
     config = replace(template, min_atr_pct=atr_threshold)
-    build = _builder_for(config)
-    return build, config.label
-
-
-def _builder_for(config) -> StrategyFn:
-    """Функция сигнала по типу конфига стратегии."""
-    if isinstance(config, StrategyV2Config):
-        return partial(mean_reversion_v2, config=config)
-    return partial(momentum, config=config)
+    return build_model(args.strategy, config), spec.label(config)
 
 
 def _validate_flags(args: argparse.Namespace) -> None:
@@ -614,7 +576,8 @@ def _parse_grid(value: str) -> List[Dict[str, float]]:
 
 
 def _wf_builder(args: argparse.Namespace, template, atr_threshold: float) -> StrategyBuilder:
-    """Фабрика стратегии для walk-forward: точка сетки → (функция, метка)."""
+    """Фабрика модели для walk-forward: точка сетки → (модель, метка)."""
+    spec = MODEL_SPECS[args.strategy]
     if template is None:
 
         def build(params: Dict[str, float]) -> Tuple[StrategyFn, str]:
@@ -622,7 +585,7 @@ def _wf_builder(args: argparse.Namespace, template, atr_threshold: float) -> Str
                 raise ValueError(
                     f"wf-grid: у mean_reversion нет параметров, получено {sorted(params)}"
                 )
-            return mean_reversion, ""
+            return build_model(args.strategy), spec.label(None)
 
         return build
 
@@ -633,7 +596,7 @@ def _wf_builder(args: argparse.Namespace, template, atr_threshold: float) -> Str
             raise ValueError(
                 f"wf-grid: неизвестный параметр для {args.strategy}: {exc}"
             ) from exc
-        return _builder_for(config), config.label
+        return build_model(args.strategy, config), spec.label(config)
 
     return build
 
