@@ -178,6 +178,11 @@ poetry run protoc -I ../proto --python_out src/analyzer ../proto/*.proto
 
 `analyzer-backtest` (entry-point → `backtest/cli.py`) переиспользует production-расчёт (`compute_all` + `mean_reversion`); отличаются источник данных, модель издержек и эмуляция выходов. Обоснования — [`../openspec/changes/backtest-runner/design.md`](../openspec/changes/backtest-runner/design.md).
 
+Торговый горизонт — **`1min`** (`../AGENTS.md` §7). Прогоны на `1h`, включая панель, — исследование
+отбора и режима: их результат не переносится в торговый контур без отдельного гейта на минутных
+данных. То же относится к `5min`/`15min` (дефолт `--intervals 1,5,15`): преимущество старшего
+фрейма для торговли требует отдельного доказательства, а не следует из прогона.
+
 ### 11.1 Контракт входных данных
 
 Выгрузку делает Collector (профиль `history-dump`, см. [`../collector/README.md`](../collector/README.md) и `../AGENTS.md` §5), Analyzer только читает:
