@@ -11,11 +11,11 @@
 Analyzer SHALL рассчитывать на основе полученных свечей и стаканов индикаторы: RSI (period 7), MACD (8,21,5), Bollinger Bands (20,2), ATR (14), VWAP, order imbalance (из стакана depth=10).
 
 #### Scenario: Получена серия свечей по инструменту
-- **WHEN** Analyzer получает свечи по SBER из Kafka `raw-market-data`
+- **WHEN** Analyzer получает свечи по инструменту из конфигурации через Kafka `raw-market-data`
 - **THEN** рассчитываются RSI, MACD, BB, ATR, VWAP; значения сохраняются в поле `indicators` (JSONB) записи `analysis_results`
 
 #### Scenario: Получен стакан
-- **WHEN** Analyzer получает стакан по BR
+- **WHEN** Analyzer получает стакан по инструменту из конфигурации
 - **THEN** рассчитывается order imbalance (bid_vol - ask_vol)/(bid_vol + ask_vol) и сохраняется в `indicators.order_imbalance`
 
 ### Requirement: Генерация сигнала BUY/SELL/HOLD
@@ -43,21 +43,25 @@ Analyzer SHALL сохранять каждый результат анализа
 Analyzer SHALL публиковать сигналы BUY/SELL в Kafka-топик `trading-signals` в формате Protobuf (сообщение `TradingSignal`). HOLD не публикуется.
 
 #### Scenario: Публикация BUY-сигнала
-- **WHEN** сгенерирован сигнал BUY по TCSG
+- **WHEN** сгенерирован сигнал BUY по инструменту из конфигурации
 - **THEN** в Kafka `trading-signals` публикуется сообщение TradingSignal с signal_id, figi, signal=BUY, confidence, suggested_price/sl/tp, expires_at
 
 ### Requirement: Multi-process масштабирование
 
-Analyzer SHALL работать как N процессов-консьюмеров в одной consumer group, с partitioning по `instrument_id` для распределения нагрузки.
+Analyzer SHALL работать как N процессов-консьюмеров в одной consumer group, с partitioning по `instrument_id` для распределения нагрузки. Число инструментов задаётся конфигурацией и не фиксируется требованием.
 
 #### Scenario: Несколько инструментов
-- **WHEN** configured 3 инструмента и 2 процесса-консьюмера
+- **WHEN** в конфигурации N инструментов и 2 процесса-консьюмера
 - **THEN** инструменты распределяются между процессами по partition key instrument_id, каждый процесс обрабатывает свои инструменты
 
 ### Requirement: Комиссионная фильтрация сигналов
 
 Analyzer SHALL оценивать потенциальную валовую прибыль сигнала и отбрасывать сигналы, где прибыль менее 3× суммарной комиссии (вход + выход).
 
+Ставка брокера за сторону MUST браться из конфигурации (`commission_rate_per_side`), а не из
+константы в коде: «Инвестор» — 0.003, «Трейдер» — 0.0005. Смена тарифа меняет долю отсекаемых
+сигналов (≈ 92 % на «Инвесторе» против единиц процентов на «Трейдере») и не требует правки кода.
+
 #### Scenario: Сигнал не проходит комиссионный фильтр
-- **WHEN** ожидаемая прибыль от сигнала < 3× комиссии
+- **WHEN** ожидаемая прибыль от сигнала < 3× комиссии, рассчитанной по ставке из конфигурации
 - **THEN** сигнал отбрасывается (HOLD), в Kafka не публикуется, в БД сохраняется с пометкой причины отклонения

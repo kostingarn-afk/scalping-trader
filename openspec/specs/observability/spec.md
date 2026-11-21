@@ -39,5 +39,5 @@ Collector, Trader (Java) и Analyzer (Python) SHALL экспортировать
 - **THEN** генерируется alert "token_expiring_soon" с датой истечения
 
 #### Scenario: Stale data
-- **WHEN** по инструменту SBER нет данных в Kafka `raw-market-data` более 30 секунд
+- **WHEN** по любому инструменту из конфигурации нет данных в Kafka `raw-market-data` более 30 секунд
 - **THEN** генерируется alert "stale_data" с указанием инструмента
