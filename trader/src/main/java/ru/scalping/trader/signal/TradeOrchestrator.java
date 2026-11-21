@@ -154,7 +154,7 @@ public class TradeOrchestrator {
             return;
         }
 
-        RiskCheckResult risk = riskManager.check(figi, price, sl, tradeRepository.lotSize(figi), deposit, 0.0);
+        RiskCheckResult risk = riskManager.check(figi, price, sl, tp, tradeRepository.lotSize(figi), deposit, 0.0);
         if (!risk.allowed()) {
             reject(signalId, figi, direction, risk.rejectReason());
             return;

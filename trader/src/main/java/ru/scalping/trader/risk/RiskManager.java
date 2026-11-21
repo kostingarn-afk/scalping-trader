@@ -86,6 +86,27 @@ public class RiskManager {
      */
     public RiskCheckResult check(String figi, double suggestedPrice, double suggestedSl,
                                  int lotSize, double deposit, double correlation) {
+        return check(figi, suggestedPrice, suggestedSl, 0.0, lotSize, deposit, correlation);
+    }
+
+    /**
+     * Полная проверка сигнала.
+     *
+     * <p>{@code suggestedTp} нужен комиссионному фильтру: без цели нельзя оценить, покроет ли
+     * сделка ratio комиссий. Значение 0 (или меньше) отключает проверку — так работает
+     * перегрузка без TP.
+     *
+     * @param figi          инструмент
+     * @param suggestedPrice цена входа
+     * @param suggestedSl   Stop-Loss
+     * @param suggestedTp   Take-Profit
+     * @param lotSize       лотность инструмента
+     * @param deposit       текущий депозит
+     * @param correlation   корреляция с открытыми позициями (0 если нет)
+     */
+    public RiskCheckResult check(String figi, double suggestedPrice, double suggestedSl,
+                                 double suggestedTp, int lotSize, double deposit,
+                                 double correlation) {
         RiskConfig cfg = config;
 
         if (pnlCircuitBreakerActive) {
@@ -113,7 +134,43 @@ public class RiskManager {
             return RiskCheckResult.rejected("position_size too small");
         }
 
+        // 5. Лимит объёма: номинал, а не риск. Объём урезается, а не отклоняется — при риске
+        // 1 % и узком стопе расчётный объём легко превышает депозит.
+        quantityLots = capByNotional(quantityLots, suggestedPrice, lotSize, deposit, cfg);
+        if (quantityLots < 1) {
+            return RiskCheckResult.rejected("notional limit");
+        }
+
+        // 6. Комиссионный фильтр: ожидаемая прибыль до TP должна покрыть ratio комиссий круга.
+        if (suggestedTp > 0
+                && !passesCommissionFilter(suggestedPrice, suggestedTp, quantityLots, lotSize, cfg)) {
+            return RiskCheckResult.rejected("commission filter");
+        }
+
         return RiskCheckResult.allowed(quantityLots);
+    }
+
+    /** Урезать объём под лимит номинала (в % депозита). */
+    int capByNotional(int lots, double price, int lotSize, double deposit, RiskConfig cfg) {
+        double notionalLimit = deposit * cfg.maxPositionNotionalPct() / 100.0;
+        if (price <= 0 || lotSize <= 0 || notionalLimit <= 0) {
+            return 0;
+        }
+        double lotsByNotional = notionalLimit / (price * lotSize);
+        return (int) Math.min(lots, Math.floor(lotsByNotional));
+    }
+
+    /**
+     * Ожидаемая прибыль до TP покрывает {@code commission_profit_ratio} комиссий круга.
+     *
+     * <p>Ставка берётся из конфигурации, поэтому смена тарифа брокера не требует правки кода:
+     * на «Инвесторе» (0.3 % за сторону) фильтр отсекает почти всё, на «Трейдере» — единицы.
+     */
+    boolean passesCommissionFilter(double entry, double tp, int lots, int lotSize, RiskConfig cfg) {
+        double units = (double) lots * lotSize;
+        double profit = Math.abs(tp - entry) * units;
+        double roundTripCost = cfg.commissionRatePerSide() * entry * units * 2;
+        return profit >= cfg.commissionProfitRatio() * roundTripCost;
     }
 
     /**

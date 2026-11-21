@@ -66,4 +66,71 @@ class RiskManagerTest {
         assertThat(result.allowed()).isTrue();
         assertThat(result.quantityLots()).isPositive();
     }
+
+    // --- Лимит номинала и комиссионный фильтр (V4) -----------------------------------
+
+    @Test
+    void notionalLimitCutsQuantityInsteadOfRejecting() {
+        RiskManager rm = new RiskManager();
+        // Риск 1 % = 2000 ₽ при стопе 100 → 90 даёт 200 лотов = 20 000 ₽ номинала.
+        // Лимит 5 % депозита (10 000 ₽) должен урезать объём до 100 лотов.
+        int lots = rm.capByNotional(200, 100.0, 1, 200_000, withNotionalPct(5.0));
+
+        assertThat(lots).isEqualTo(100);
+    }
+
+    @Test
+    void notionalLimitRejectsWhenEvenOneLotDoesNotFit() {
+        RiskManager rm = new RiskManager();
+        rm.updateConfig(withNotionalPct(10.0));
+        // Цена 30 000 при стопе 29 000 → 2 лота = 60 000 ₽, а лимит 10 % = 20 000 ₽.
+        RiskCheckResult result = rm.check("SBER", 30_000.0, 29_000.0, 1, 200_000, 0.0);
+
+        assertThat(result.allowed()).isFalse();
+        assertThat(result.rejectReason()).contains("notional limit");
+    }
+
+    @Test
+    void commissionFilterRejectsThinTargetOnInvestorTariff() {
+        RiskManager rm = new RiskManager();
+        // Цель 0.5 % при ставке 0.3 % за сторону: круг 0.6 %, ratio 3 → нужно 1.8 %.
+        RiskCheckResult result = rm.check("SBER", 100.0, 99.0, 100.5, 1, 200_000, 0.0);
+
+        assertThat(result.allowed()).isFalse();
+        assertThat(result.rejectReason()).contains("commission filter");
+    }
+
+    @Test
+    void commissionFilterPassesSameTargetOnTraderTariff() {
+        RiskManager rm = new RiskManager();
+        rm.updateConfig(withCommissionRate(0.0005));
+
+        RiskCheckResult result = rm.check("SBER", 100.0, 99.0, 100.5, 1, 200_000, 0.0);
+
+        assertThat(result.allowed()).isTrue();
+    }
+
+    @Test
+    void commissionFilterSkippedWithoutTarget() {
+        RiskManager rm = new RiskManager();
+
+        // Перегрузка без TP: фильтр не применяется, иначе сигналы без цели отсекались бы все.
+        assertThat(rm.check("SBER", 100.0, 99.0, 1, 200_000, 0.0).allowed()).isTrue();
+    }
+
+    private static RiskConfig withNotionalPct(double notionalPct) {
+        RiskConfig d = RiskConfig.defaults();
+        return new RiskConfig(d.maxLossPerTradePct(), d.pnlCircuitBreakerPct(),
+                d.commissionProfitRatio(), d.maxOpenPositions(), d.maxHoldingTimeMinutes(),
+                d.correlationThreshold(), d.maxTradesPerMinute(), d.entryAfterMskMinutes(),
+                d.commissionRatePerSide(), notionalPct);
+    }
+
+    private static RiskConfig withCommissionRate(double ratePerSide) {
+        RiskConfig d = RiskConfig.defaults();
+        return new RiskConfig(d.maxLossPerTradePct(), d.pnlCircuitBreakerPct(),
+                d.commissionProfitRatio(), d.maxOpenPositions(), d.maxHoldingTimeMinutes(),
+                d.correlationThreshold(), d.maxTradesPerMinute(), d.entryAfterMskMinutes(),
+                ratePerSide, d.maxPositionNotionalPct());
+    }
 }

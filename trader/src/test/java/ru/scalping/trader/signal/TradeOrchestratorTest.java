@@ -73,7 +73,7 @@ class TradeOrchestratorTest {
                 .thenReturn(SignalProcessor.ValidationResult.ok(SIGNAL_ID));
         when(exchangeStateProvider.tradingStatus(FIGI)).thenReturn(NORMAL_TRADING);
         when(tradeRepository.lotSize(FIGI)).thenReturn(1);
-        when(riskManager.check(anyString(), anyDouble(), anyDouble(), anyInt(), anyDouble(), anyDouble()))
+        when(riskManager.check(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt(), anyDouble(), anyDouble()))
                 .thenReturn(RiskCheckResult.allowed(QUANTITY_LOTS));
     }
 
@@ -156,7 +156,7 @@ class TradeOrchestratorTest {
 
     @Test
     void handle_riskRejected_rejectsSignal() {
-        when(riskManager.check(anyString(), anyDouble(), anyDouble(), anyInt(), anyDouble(), anyDouble()))
+        when(riskManager.check(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt(), anyDouble(), anyDouble()))
                 .thenReturn(RiskCheckResult.rejected("max_open_positions reached"));
 
         orchestrator.handle(buySignal(SIGNAL_ID));
