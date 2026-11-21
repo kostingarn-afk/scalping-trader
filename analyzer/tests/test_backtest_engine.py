@@ -430,3 +430,78 @@ def test_run_is_deterministic():
     second = format_markdown([_run(bars, _config())])
 
     assert first == second
+
+
+# --- Дневной лимит убытка (зеркало PnlCircuitBreaker) --------------------------------
+
+
+def test_daily_stop_closes_position_and_blocks_entries_same_day():
+    """Все бары внутри одной UTC-даты: сессия не меняется, лимит не сбрасывается."""
+    bars = _flat_bars(31)
+    bars.append(_bar(31, close=99.0, low=97.0, high=99.5))
+    bars.extend(_bar(minute) for minute in range(32, 55))
+
+    without_stop = _run(bars, _config())
+    with_stop = _run(bars, _config(daily_loss_stop_pct=1.0))
+
+    assert len(without_stop.trades) >= 2, "без лимита после выхода правило входит снова"
+    assert len(with_stop.trades) == 1
+    assert with_stop.trades[0].exit_reason is ExitReason.DAILY_STOP
+    assert with_stop.trades[0].net_pnl < 0
+
+
+def test_daily_stop_resets_on_next_session():
+    first_day = _flat_bars(31) + [_bar(31, close=99.0, low=97.0, high=99.5)]
+    next_day = [
+        Bar(
+            ts=START + timedelta(days=1, minutes=minute),
+            open=100.0,
+            high=100.2,
+            low=99.8,
+            close=100.0,
+            volume=100,
+        )
+        for minute in range(30)
+    ]
+
+    result = _run(first_day + next_day, _config(daily_loss_stop_pct=1.0))
+
+    assert len(result.trades) >= 2, "на новой сессии запрет снимается"
+
+
+def test_daily_loss_stop_pct_is_validated():
+    with pytest.raises(ValueError):
+        RunConfig(daily_loss_stop_pct=101)
+
+
+# --- Окно входа: запрет первого часа сессии ------------------------------------------
+
+
+def test_minutes_of_day_msk_adds_three_hours():
+    moment = datetime(2026, 11, 13, 7, 30, tzinfo=timezone.utc)
+
+    assert engine.minutes_of_day_msk(moment) == 10 * 60 + 30
+
+
+def test_entry_window_blocks_first_session_hour():
+    """START = 07:00 UTC = 10:00 МСК: первому часу сессии входы запрещены."""
+    bars = _flat_bars(40)
+
+    assert _run(bars, _config()).open_at_end is True, "без окна вход происходит"
+    blocked = _run(bars, _config(entry_after_msk_minutes=660))
+
+    assert blocked.trades == ()
+    assert blocked.open_at_end is False
+
+
+def test_entry_window_allows_from_configured_hour():
+    bars = [_bar(minute) for minute in range(60, 100)]  # 08:00 UTC = 11:00 МСК
+
+    result = _run(bars, _config(entry_after_msk_minutes=660))
+
+    assert result.open_at_end is True
+
+
+def test_entry_after_msk_minutes_is_validated():
+    with pytest.raises(ValueError):
+        RunConfig(entry_after_msk_minutes=1441)

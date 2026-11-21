@@ -23,7 +23,10 @@ class AnalyzerPipeline:
 
     def __init__(self, config: AnalyzerConfig):
         self.config = config
-        self.filter = CommissionFilter(ratio=config.commission_profit_ratio)
+        self.filter = CommissionFilter(
+            ratio=config.commission_profit_ratio,
+            rate_per_side=config.commission_rate_per_side,
+        )
         self.repository = AnalysisRepository(config.db_url)
         self.publisher = SignalPublisher(config)
         # Кэш последних свечей по figi (упрощённо; в проде — ring buffer)

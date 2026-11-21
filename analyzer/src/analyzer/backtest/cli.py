@@ -22,6 +22,7 @@ from .loader import HistoryDataset, aggregate, load_dataset, scan_dir
 from .models import BacktestResult, Bar, Instrument, RunConfig
 from .nullmodel import format_null_markdown, run_null
 from .panel import (
+    SIGNAL_MODES,
     PanelConfig,
     build_daily_closes,
     format_panel_markdown,
@@ -158,6 +159,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--panel-rebalance", type=int, default=5, help="ребаланс, торговых дней")
     parser.add_argument("--panel-legs", type=int, default=4, help="имён в каждой стороне книги")
     parser.add_argument(
+        "--panel-signal",
+        choices=SIGNAL_MODES,
+        default="raw",
+        help=(
+            "чем ранжировать вселенную: raw — сырая доходность за окно; residual — доходность "
+            "минус рыночная часть (по бете); volscaled — доходность на единицу риска"
+        ),
+    )
+    parser.add_argument(
+        "--panel-daily-stop",
+        type=float,
+        default=0.0,
+        help="дневной лимит убытка книги, %% (0 — выключено): период закрывается по дню пробития",
+    )
+    parser.add_argument(
+        "--daily-stop",
+        type=float,
+        default=0.0,
+        help="дневной лимит убытка на сделку, %% депозита (0 — выключено; зеркало PnL-CB Trader)",
+    )
+    parser.add_argument(
+        "--entry-after-msk",
+        default="",
+        help=(
+            "запрет входов до указанного времени по Москве, формат HH:MM "
+            "(например 11:00 — не торговать первый час основной сессии; пусто — выключено)"
+        ),
+    )
+    parser.add_argument(
+        "--exchange-fee-per-contract",
+        type=float,
+        default=0.0,
+        help=(
+            "биржа берёт фиксированный сбор за контракт (₽ за сторону), а не процент "
+            "с номинала: для фьючерсов задаётся этим флагом, иначе модель считает только "
+            "процент брокера и результат недостоверен. Ставка — из тарифного листа биржи"
+        ),
+    )
+    parser.add_argument(
         "--panel-grid",
         default="",
         help="сетка панели: 'lookback_days=5,10;rebalance_days=5;legs=3,4'",
@@ -231,6 +271,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             trailing_atr=args.trailing_atr,
             no_tp=args.no_tp,
             fill_on_next_bar_open=not args.fill_on_close,
+            daily_loss_stop_pct=args.daily_stop,
+            entry_after_msk_minutes=_parse_msk_time(args.entry_after_msk),
         )
         walkforward = _walkforward_settings(args)
     except (FileNotFoundError, ValueError) as exc:
@@ -281,7 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             bars=bars,
                             instrument=dataset.instrument,
                             config=run_config,
-                            commission=CommissionModel(tariff),
+                            commission=_commission_model(args, tariff),
                             interval_minutes=interval,
                             strategy_fn=strategy_fn,
                             label=_join_label(label, strategy_label),
@@ -356,7 +398,7 @@ def _run_null_block(
                 bars=bars,
                 instrument=instrument,
                 config=run_config,
-                commission=CommissionModel(tariff),
+                commission=_commission_model(args, tariff),
                 interval_minutes=interval,
                 actual=(total_net, len(result.trades)),
                 seeds=args.null_seeds,
@@ -633,7 +675,7 @@ def _run_walkforward(
                             bars=bars,
                             instrument=dataset.instrument,
                             config=config,
-                            commission=CommissionModel(tariff),
+                            commission=_commission_model(args, tariff),
                             interval_minutes=interval,
                             grid=settings["grid"],  # type: ignore[arg-type]
                             build_strategy=builder,
@@ -681,6 +723,32 @@ def _parse_ints(value: str, name: str) -> List[int]:
     return parsed
 
 
+def _parse_msk_time(value: str) -> int:
+    """`HH:MM` по Москве → минуты от полуночи. Пустая строка — ограничения нет (0)."""
+    if not value or not value.strip():
+        return 0
+    text = value.strip()
+    parts = text.split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"--entry-after-msk: ожидался формат HH:MM, получено {value!r}")
+    hours, minutes = int(parts[0]), int(parts[1])
+    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+        raise ValueError(f"--entry-after-msk: время вне диапазона суток: {value!r}")
+    return hours * 60 + minutes
+
+
+def _commission_model(args: argparse.Namespace, tariff: str) -> CommissionModel:
+    """Модель издержек тарифа с биржевым сбором за контракт.
+
+    Сбор применяется только к фьючерсам: бумаги платят процент брокера, у срочного рынка
+    есть ещё фиксированная плата за контракт, которую процентной ставкой не описать.
+    """
+    return CommissionModel(
+        tariff,
+        exchange_fee_per_contract_rub=getattr(args, "exchange_fee_per_contract", 0.0),
+    )
+
+
 def _panel_settings(args: argparse.Namespace) -> Optional[Dict[str, object]]:
     """Параметры панельного режима или None. Сетка разворачивается до запуска прогонов."""
     panel_flags = args.panel_grid or args.panel_null_seeds or args.panel_walkforward
@@ -706,6 +774,8 @@ def _panel_settings(args: argparse.Namespace) -> Optional[Dict[str, object]]:
             "lookback_days": args.panel_lookback,
             "rebalance_days": args.panel_rebalance,
             "legs": args.panel_legs,
+            "signal": args.panel_signal,
+            "daily_stop_pct": args.panel_daily_stop,
         }
         params.update({key: int(value) for key, value in point.items()})
         try:

@@ -45,6 +45,9 @@ class Summary:
     avg_bars_held: float
     equity_final: float
     open_at_end: bool
+    # Выходы по дневному лимиту убытка. Отдельным полем, а не в тройке TP/SL/TIMEOUT:
+    # колонка отчёта остаётся совместимой, а тип выхода виден в блоке «Выходы».
+    daily_stops: int = 0
 
 
 def summarize(result: BacktestResult) -> Summary:
@@ -85,6 +88,7 @@ def summarize(result: BacktestResult) -> Summary:
         avg_bars_held=sum(t.bars_held for t in trades) / count if count else 0.0,
         equity_final=result.equity_final,
         open_at_end=result.open_at_end,
+        daily_stops=exits.get(ExitReason.DAILY_STOP.value, 0),
     )
 
 
@@ -194,7 +198,12 @@ def _tp_sl_variants(results: Sequence[BacktestResult]) -> List[str]:
     return variants
 
 
-EXIT_ORDER = (ExitReason.TAKE_PROFIT, ExitReason.STOP_LOSS, ExitReason.TIMEOUT)
+EXIT_ORDER = (
+    ExitReason.TAKE_PROFIT,
+    ExitReason.STOP_LOSS,
+    ExitReason.TIMEOUT,
+    ExitReason.DAILY_STOP,
+)
 # Блок по типам выхода печатается целиком только для компактных наборов прогонов;
 # в переборах (десятки вариантов) — только для лучшего по итогу.
 EXITS_MAX_RUNS = 12

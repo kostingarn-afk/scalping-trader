@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -29,6 +29,16 @@ from .models import (
 )
 
 StrategyFn = Callable[[Indicators, float, float, float], Signal]
+
+# Москва — UTC+3 круглый год (перевод часов отменён в 2014), поэтому фиксированное смещение
+# корректно и не требует базы часовых поясов.
+MSK = timezone(timedelta(hours=3))
+
+
+def minutes_of_day_msk(ts: datetime) -> int:
+    """Минуты от полуночи по Москве: вход разрешается с `RunConfig.entry_after_msk_minutes`."""
+    local = ts.astimezone(MSK)
+    return local.hour * 60 + local.minute
 
 
 @dataclass
@@ -97,16 +107,49 @@ def run_backtest(
     index = 0
     total = len(bar_list)
 
+    # Дневной лимит убытка (зеркало `PnlCircuitBreaker`): реализованный PnL текущей сессии
+    # и даты, на которых торговля уже остановлена.
+    stop_limit = cfg.daily_loss_stop_pct / 100.0 * cfg.deposit
+    day_pnl = 0.0
+    current_day: Optional[date] = None
+    halted_days: set[date] = set()
+
     while index < total:
         bar = bar_list[index]
+        day = bar.ts.date()
+        if day != current_day:
+            current_day = day
+            day_pnl = 0.0
 
         if position is not None:
+            # Дневной лимит: проверяется и плавающий убыток, иначе в позиции с одной сделкой
+            # правило срабатывало бы только после закрытия — то есть никогда в момент,
+            # когда убыток ещё можно остановить.
+            if stop_limit > 0:
+                floating = _floating_pnl(position, bar.close, instrument)
+                if day_pnl + floating <= -stop_limit:
+                    trades.append(
+                        _close_trade(
+                            position, bar, index, bar.close, ExitReason.DAILY_STOP,
+                            instrument, model,
+                        )
+                    )
+                    day_pnl += trades[-1].net_pnl
+                    halted_days.add(day)
+                    position = None
+                    last_exit_index = index
+                    index += 1
+                    continue
+
             fill = _exit_fill(position, bar, index, cfg)
             if fill is not None:
                 exit_price, reason = fill
                 trades.append(
                     _close_trade(position, bar, index, exit_price, reason, instrument, model)
                 )
+                day_pnl += trades[-1].net_pnl
+                if stop_limit > 0 and day_pnl <= -stop_limit:
+                    halted_days.add(day)
                 position = None
                 last_exit_index = index
             else:
@@ -120,6 +163,11 @@ def run_backtest(
             index += 1
             continue
 
+        if day in halted_days:
+            # Дневной лимит пробит: новых входов до следующей торговой сессии.
+            index += 1
+            continue
+
         if index + 1 < cfg.min_candles:
             index += 1
             continue
@@ -129,6 +177,15 @@ def run_backtest(
         fill_index = index + 1 if cfg.fill_on_next_bar_open else index
         if fill_index >= total:
             break
+
+        # Окно входа: до `entry_after_msk_minutes` новые позиции не открываются. Проверяется
+        # время исполнения (бар входа), а не время сигнала — ордер уходит именно тогда.
+        if (
+            cfg.entry_after_msk_minutes
+            and minutes_of_day_msk(bar_list[fill_index].ts) < cfg.entry_after_msk_minutes
+        ):
+            index += 1
+            continue
 
         start = max(0, index + 1 - cfg.window)
         indicators = compute_all(
@@ -213,7 +270,10 @@ def passes_commission_filter(
     units = instrument.lot_size
     profit = abs(signal.suggested_tp - entry_price) * units
     cost = model.round_trip(
-        entry_price * units, signal.suggested_tp * units, instrument.is_future
+        entry_price * units,
+        signal.suggested_tp * units,
+        instrument.is_future,
+        contracts=1,
     )
     if cost <= 0:
         return profit > 0
@@ -288,6 +348,17 @@ def _exit_fill(
     return None
 
 
+def _floating_pnl(position: _OpenPosition, price: float, instrument: Instrument) -> float:
+    """Плавающий результат открытой позиции по текущей цене, без комиссии.
+
+    Комиссия входит в `net_pnl` уже закрытых сделок (`day_pnl`), поэтому здесь она не
+    дублируется: для решения о стопе важнее не занизить убыток, а не завысить его
+    приблизительной оценкой.
+    """
+    direction = 1.0 if position.direction is Direction.LONG else -1.0
+    return (price - position.entry_price) * direction * position.lots * instrument.lot_size
+
+
 def _close_trade(
     position: _OpenPosition,
     bar: Bar,
@@ -301,7 +372,10 @@ def _close_trade(
     direction = 1.0 if position.direction is Direction.LONG else -1.0
     gross = (exit_price - position.entry_price) * units * direction
     cost = model.round_trip(
-        position.entry_price * units, exit_price * units, instrument.is_future
+        position.entry_price * units,
+        exit_price * units,
+        instrument.is_future,
+        contracts=position.lots,
     )
     return Trade(
         direction=position.direction,

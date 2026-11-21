@@ -61,6 +61,9 @@ class ExitReason(str, Enum):
     TAKE_PROFIT = "TP"
     STOP_LOSS = "SL"
     TIMEOUT = "TIMEOUT"
+    # Принудительный выход при пробитии дневного лимита убытка: зеркало
+    # `PnlCircuitBreaker` из Trader, чтобы бэктест и боевой контур мерили одно и то же.
+    DAILY_STOP = "DAILY_STOP"
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,15 @@ class RunConfig:
     # Вход по открытию следующего бара: сигнал рассчитан по закрытой свече, исполнение —
     # по первой доступной после неё цене. False — воспроизводит замер `to_be.md` §3.
     fill_on_next_bar_open: bool = True
+    # Дневной лимит убытка в процентах депозита (0 — выключено). Семантика как у
+    # `PnlCircuitBreaker` в Trader: считается **реализованный** PnL за торговый день
+    # (UTC-дата закрытия сделки; сессия MOEX целиком лежит внутри одной UTC-даты),
+    # при пробитии позиция ликвидируется и новые входы запрещены до следующего дня.
+    daily_loss_stop_pct: float = 0.0
+    # Запрет входов до указанного времени по Москве (минуты от полуночи; 0 — выключено).
+    # 660 = 11:00 МСК: первый час основной сессии по замеру 2026-11-21 даёт −3.8 б.п. дрейфа
+    # (t −2.53), и входить в него невыгодно. Зеркало `entry_after_msk_minutes` в Trader.
+    entry_after_msk_minutes: int = 0
 
     def __post_init__(self) -> None:
         if self.deposit <= 0:
@@ -139,6 +151,10 @@ class RunConfig:
             raise ValueError("cooldown_bars must not be negative")
         if self.trailing_atr < 0:
             raise ValueError("trailing_atr must not be negative")
+        if not 0 <= self.daily_loss_stop_pct <= 100:
+            raise ValueError("daily_loss_stop_pct must be in [0, 100]")
+        if not 0 <= self.entry_after_msk_minutes <= 1440:
+            raise ValueError("entry_after_msk_minutes must be in [0, 1440]")
         if self.window < self.min_candles:
             raise ValueError("window must not be less than min_candles")
 

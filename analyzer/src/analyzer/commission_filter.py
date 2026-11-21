@@ -12,10 +12,13 @@ from .strategy import Signal, SignalType
 @dataclass(frozen=True)
 class CommissionFilter:
     ratio: float = 3.0  # commission_profit_ratio из risk_config
+    # Ставка за сторону: «Инвестор» 0.003, «Трейдер» 0.0005. Живёт в конфиге, а не в коде:
+    # ставка меняет, сколько сигналов переживёт фильтр (на «Инвесторе» отсекается ~92 %).
+    rate_per_side: float = 0.003
 
     def estimate_commission(self, price: float, quantity: int) -> float:
-        """Комиссия T-Invest: 0.3% от оборота (заглушка; точная формула зависит от инструмента)."""
-        return 0.003 * price * quantity * 2  # вход + выход
+        """Круговая комиссия: ставка брокера за сторону × две стороны."""
+        return self.rate_per_side * price * quantity * 2  # вход + выход
 
     def estimate_profit(self, signal: Signal, quantity: int) -> float:
         """Ожидаемая прибыль = |TP - entry| × quantity."""

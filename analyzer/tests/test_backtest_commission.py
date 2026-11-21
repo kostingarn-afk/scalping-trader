@@ -119,3 +119,45 @@ def test_signal_without_stop_is_dropped_as_untradeable():
     )
 
     assert not kept
+
+
+# --- Биржевой сбор за контракт (срочный рынок) ---------------------------------------
+
+
+def test_futures_exchange_fee_is_per_contract():
+    model = CommissionModel("trader", exchange_fee_per_contract_rub=1.5)
+
+    cost = model.side_commission(80_000.0, is_future=True, contracts=2)
+
+    assert cost == pytest.approx(0.0004 * 80_000 + 3.0)
+
+
+def test_futures_fee_is_skipped_without_contract_count():
+    """Без числа контрактов модель считает только процент — и это видно по результату."""
+    model = CommissionModel("trader", exchange_fee_per_contract_rub=1.5)
+
+    assert model.side_commission(80_000.0, is_future=True) == pytest.approx(32.0)
+
+
+def test_security_ignores_contract_fee():
+    model = CommissionModel("trader", exchange_fee_per_contract_rub=1.5)
+
+    assert model.side_commission(100_000.0, is_future=False, contracts=5) == pytest.approx(50.0)
+
+
+def test_round_trip_charges_fee_on_both_sides():
+    model = CommissionModel("trader", exchange_fee_per_contract_rub=1.0)
+
+    cost = model.round_trip(80_000.0, 80_000.0, is_future=True, contracts=1)
+
+    assert cost == pytest.approx(2 * (0.0004 * 80_000 + 1.0))
+
+
+def test_negative_contracts_rejected():
+    with pytest.raises(ValueError):
+        CommissionModel("trader").side_commission(1.0, is_future=True, contracts=-1)
+
+
+def test_negative_exchange_fee_rejected():
+    with pytest.raises(ValueError):
+        CommissionModel("trader", exchange_fee_per_contract_rub=-1)

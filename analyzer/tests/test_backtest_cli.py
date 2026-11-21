@@ -6,7 +6,9 @@ import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from analyzer.backtest.cli import main
+import pytest
+
+from analyzer.backtest.cli import _parse_msk_time, main
 
 START = datetime(2026, 11, 13, 7, 0, tzinfo=timezone.utc)
 
@@ -428,3 +430,12 @@ def test_cli_null_seeds_rejected_with_walkforward(tmp_path: Path, capsys):
 
     assert code == 2
     assert "несовместим" in capsys.readouterr().err
+
+
+def test_parse_msk_time():
+    assert _parse_msk_time("") == 0
+    assert _parse_msk_time("11:00") == 660
+    assert _parse_msk_time(" 9:30 ") == 570
+    for broken in ("1100", "11", "25:00", "11:70", "aa:bb"):
+        with pytest.raises(ValueError):
+            _parse_msk_time(broken)

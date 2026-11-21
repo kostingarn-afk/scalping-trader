@@ -5,17 +5,23 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from analyzer.backtest.loader import HistoryDataset
 from analyzer.backtest.models import Bar, Instrument
 from analyzer.backtest.panel import (
+    SIGNAL_MODES,
     PanelConfig,
+    PanelPeriod,
+    PanelResult,
     aggregate_panel,
+    apply_daily_stop,
     build_daily_closes,
     format_panel_markdown,
     format_panel_walkforward_markdown,
+    rank_scores,
     run_panel,
     run_panel_null,
     run_panel_walkforward,
@@ -240,3 +246,168 @@ def test_select_universe_rejects_unknown_ticker():
 
     with pytest.raises(ValueError):
         select_universe(frame, "A,NOPE")
+
+
+# --- Ранжирование с очисткой от рынка -------------------------------------------------
+
+
+def test_rank_scores_raw_returns_momentum_unchanged():
+    momentum = np.array([0.05, -0.02])
+    window = pd.DataFrame({"A": [0.01, 0.02], "B": [-0.01, 0.0]})
+
+    scores = rank_scores("raw", momentum, window)
+
+    assert scores is momentum
+
+
+def test_rank_scores_residual_strips_market_beta():
+    """Бумага с высокой бетой выше по сырой доходности, но по остатку — ниже."""
+    market = np.array([0.02, -0.01, 0.015, -0.005, 0.01, -0.02])
+    window = pd.DataFrame(
+        {
+            "BETA": 1.8 * market,
+            "ALPHA": 0.2 * market + 0.004,
+        }
+    )
+    momentum = np.array([1.8 * (0.02 - 0.01), 0.2 * (0.02 - 0.01) + 2 * 0.004])
+
+    scores = rank_scores("residual", momentum, window)
+
+    assert momentum[0] > momentum[1], "сырая доходность ставит BETA выше"
+    assert scores[1] > scores[0], "после вычета рынка выше оказывается ALPHA"
+
+
+def test_rank_scores_residual_falls_back_to_momentum_without_market_variance():
+    momentum = np.array([0.03, 0.01])
+    window = pd.DataFrame({"A": [0.01, 0.01], "B": [0.01, 0.01]})
+
+    scores = rank_scores("residual", momentum, window)
+
+    assert scores == pytest.approx(momentum)
+
+
+def test_rank_scores_volscaled_penalises_volatility():
+    momentum = np.array([0.04, 0.04])
+    window = pd.DataFrame({"CALM": [0.01, -0.005, 0.01], "WILD": [0.05, -0.03, 0.05]})
+
+    scores = rank_scores("volscaled", momentum, window)
+
+    assert scores[0] > scores[1]
+
+
+def test_rank_scores_volscaled_puts_zero_risk_on_the_edge():
+    momentum = np.array([0.04, -0.02])
+    window = pd.DataFrame({"STEADY": [0.01, 0.01, 0.01], "SHAKY": [0.05, -0.03, 0.05]})
+
+    scores = rank_scores("volscaled", momentum, window)
+
+    assert scores[0] == np.inf
+    assert scores[1] < 0
+
+
+def test_rank_scores_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        rank_scores("excess", np.array([0.1]), pd.DataFrame({"A": [0.1, 0.2]}))
+
+
+def test_signal_mode_is_part_of_label_and_validated():
+    assert PanelConfig(signal="residual").label == "L5-R5-k4-resi"
+    assert PanelConfig(signal="volscaled").label == "L5-R5-k4-vols"
+    assert set(SIGNAL_MODES) == {"raw", "residual", "volscaled"}
+    with pytest.raises(ValueError):
+        PanelConfig(signal="excess")
+
+
+# --- Дневной стоп книги --------------------------------------------------------------
+
+
+def test_daily_stop_truncates_period_on_breach():
+    """Книга теряет 10 % за первый день периода при лимите 1 % — выход в тот же день."""
+    frame = _panel(
+        {
+            "WIN": [100.0, 110.0, 99.0, 98.0, 97.0],
+            "LOSE": [100.0, 90.0, 100.0, 100.0, 100.0],
+            "FLAT1": [100.0] * 5,
+            "FLAT2": [100.0] * 5,
+        }
+    )
+    config = _config(lookback_days=1, rebalance_days=3, legs=1)
+
+    without_stop = run_panel(frame, config)
+    with_stop = run_panel(frame, _config(lookback_days=1, rebalance_days=3, legs=1, daily_stop_pct=1.0))
+
+    assert without_stop.periods[0].longs == ("WIN",)
+    assert without_stop.periods[0].end == _dates(5)[4]
+    assert with_stop.periods[0].end == _dates(5)[2]
+    assert with_stop.periods[0].gross < 0
+
+
+def test_daily_stop_disabled_keeps_period_end():
+    frame = _panel({"A": [100.0, 104.0, 108.0], "B": [100.0, 96.0, 92.0]})
+
+    stopped = apply_daily_stop(frame, ("A",), ("B",), 0, 2, stop_pct=0.0)
+
+    assert stopped == 2
+
+
+# --- Правило проверки на концентрацию ------------------------------------------------
+
+
+def _period(net: float) -> PanelPeriod:
+    return PanelPeriod(
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 15),
+        universe=6,
+        longs=("A",),
+        shorts=("B",),
+        gross=net,
+        cost=0.0,
+        net=net,
+        benchmark=0.0,
+    )
+
+
+def test_trimmed_removes_best_periods():
+    """Прибыль держится на трёх периодах — после обрезки почти ничего не остаётся."""
+    result = PanelResult(
+        config=PanelConfig(),
+        periods=tuple(
+            [_period(0.10), _period(0.10), _period(0.10)] + [_period(0.001) for _ in range(7)]
+        ),
+    )
+
+    trimmed_net, trimmed_t = result.trimmed()
+
+    assert result.net == pytest.approx(0.307)
+    assert trimmed_net == pytest.approx(0.007)
+    assert trimmed_t < 1.0
+
+
+def test_trimmed_reports_missing_periods_as_zero():
+    result = PanelResult(config=PanelConfig(), periods=(_period(0.05), _period(0.04)))
+
+    assert result.trimmed() == (0.0, 0.0)
+
+
+def test_trimmed_keeps_broad_result():
+    """Ровный плюс по всем периодам обрезка не ломает — это и есть устойчивый результат."""
+    steady = [0.010, 0.012, 0.008, 0.011, 0.009, 0.010, 0.012, 0.008, 0.010]
+    result = PanelResult(
+        config=PanelConfig(),
+        periods=tuple([_period(0.020), _period(0.018), _period(0.016)]
+                      + [_period(value) for value in steady]),
+    )
+
+    trimmed_net, trimmed_t = result.trimmed()
+
+    assert trimmed_net == pytest.approx(sum(steady))
+    assert trimmed_t > 5
+
+
+def test_report_contains_concentration_columns():
+    result = run_panel(_trending(), _config(cost_per_side=0.0005))
+
+    report = format_panel_markdown([result])
+
+    assert "Net без 3 лучших %" in report
+    assert "проверки на концентрацию" in report

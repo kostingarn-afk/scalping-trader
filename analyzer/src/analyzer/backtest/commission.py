@@ -36,6 +36,11 @@ class CommissionModel:
 
     tariff: str = "investor"
     min_commission_rub: float = 0.0
+    # Биржевой сбор за контракт, ₽ за сторону. На срочном рынке он фиксирован за контракт,
+    # а не пропорционален номиналу, поэтому процентной моделью не описывается. 0 — сбор
+    # не задан: фьючерсный прогон тогда считает только брокерский процент и недостоверен
+    # (см. `to_do.md` §4.3). Ставку не выдумываем: она берётся из тарифного листа биржи.
+    exchange_fee_per_contract_rub: float = 0.0
 
     def __post_init__(self) -> None:
         if self.tariff not in RATES_PER_SIDE:
@@ -44,6 +49,8 @@ class CommissionModel:
             )
         if self.min_commission_rub < 0:
             raise ValueError("min_commission_rub must be non-negative")
+        if self.exchange_fee_per_contract_rub < 0:
+            raise ValueError("exchange_fee_per_contract_rub must be non-negative")
 
     @property
     def round_trip_rate(self) -> float:
@@ -54,16 +61,31 @@ class CommissionModel:
         kind = FUTURE if is_future else SECURITY
         return RATES_PER_SIDE[self.tariff][kind]
 
-    def side_commission(self, notional: float, is_future: bool) -> float:
-        """Комиссия одной стороны сделки (вход или выход)."""
+    def side_commission(
+        self, notional: float, is_future: bool, contracts: int = 0
+    ) -> float:
+        """Комиссия одной стороны сделки (вход или выход).
+
+        `contracts` — число контрактов; для фьючерсов добавляет фиксированный биржевой сбор
+        за контракт. Ноль означает «сбор не передан»: остаётся только процент брокера.
+        """
         if notional < 0:
             raise ValueError("notional must be non-negative")
-        return max(self.min_commission_rub, self.per_side_rate(is_future) * notional)
+        if contracts < 0:
+            raise ValueError("contracts must not be negative")
+        cost = max(self.min_commission_rub, self.per_side_rate(is_future) * notional)
+        if is_future and contracts:
+            cost += self.exchange_fee_per_contract_rub * contracts
+        return cost
 
     def round_trip(
-        self, entry_notional: float, exit_notional: float, is_future: bool
+        self,
+        entry_notional: float,
+        exit_notional: float,
+        is_future: bool,
+        contracts: int = 0,
     ) -> float:
         """Комиссия входа и выхода вместе."""
-        return self.side_commission(entry_notional, is_future) + self.side_commission(
-            exit_notional, is_future
-        )
+        return self.side_commission(
+            entry_notional, is_future, contracts
+        ) + self.side_commission(exit_notional, is_future, contracts)

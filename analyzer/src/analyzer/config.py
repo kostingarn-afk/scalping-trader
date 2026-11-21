@@ -1,9 +1,9 @@
 """Конфигурация Analyzer."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import yaml
 
@@ -15,14 +15,15 @@ class AnalyzerConfig:
     topic_raw: str = "raw-market-data"
     topic_signals: str = "trading-signals"
     num_processes: int = 2
-    instruments: List[str] = field(
-        default_factory=lambda: ["GAZP", "VTBR", "ROSN", "NVTK", "PLZL"]
-    )
     strategy_id: str = "mean_reversion_bb"
     analyzer_version: str = "0.1.0"
     signal_ttl_seconds: int = 30
     # Риск-параметры (дубликат risk_config для автономии; актуальные — из БД)
     commission_profit_ratio: float = 3.0
+    # Ставка брокера за сторону сделки: «Инвестор» 0.003, «Трейдер» 0.0005,
+    # «Премиум» 0.0004. Отдельным полем, чтобы смена тарифа была правкой конфига,
+    # а не кода (фильтр отбрасывает ~92 % сигналов на «Инвесторе» и ~8 % на «Трейдере»).
+    commission_rate_per_side: float = 0.003
     db_url: str = "postgresql://scalping:scalping@localhost:5432/scalping"
     metrics_port: int = 8000
     # Сжатие producer'а trading-signals. gzip — из stdlib; lz4 требует пакета `lz4`,

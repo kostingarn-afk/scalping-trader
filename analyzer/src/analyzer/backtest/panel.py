@@ -36,6 +36,94 @@ from .walkforward import Fold, build_folds
 # Функция преобразования моментума в оценки: точка расширения для нулевой модели.
 Ranker = Callable[[Sequence[float]], Sequence[float]]
 
+# Режимы ранжирования (см. `PanelConfig.signal`). `raw` — по умолчанию: остальные режимы
+# меняют смысл замера, поэтому включаются флагом CLI, а не автоматически.
+SIGNAL_MODES = ("raw", "residual", "volscaled")
+
+# Сколько лучших периодов удаляется в проверке на концентрацию (см. `PanelResult.trimmed`).
+CONCENTRATION_DROP = 3
+
+
+def rank_scores(kind: str, momentum: np.ndarray, window_returns: pd.DataFrame) -> np.ndarray:
+    """Оценки для сортировки вселенной: сырая доходность, остаток от рынка или доходность на риск.
+
+    `window_returns` — дневные доходности бумаг за окно формирования (строки — дни,
+    столбцы — имена в том же порядке, что и `momentum`).
+
+    Зачем `residual`: сырая доходность за окно на 60–85 % состоит из движения рынка
+    (корреляция бумаг вселенной с рынком 0.50–0.85). Без вычета рыночной части книга
+    долларово-нейтральна по позиции, но не по сигналу: в лонги попадают бумаги с высокой
+    бетой, а не с сильной собственной динамикой.
+    """
+    if kind == "raw":
+        return momentum
+    values = window_returns.to_numpy(dtype=float)
+    if values.shape[0] < 2:
+        return momentum
+
+    if kind == "volscaled":
+        vol = np.nanstd(values, axis=0, ddof=1)
+        scores = np.divide(
+            momentum, vol, out=np.zeros_like(momentum, dtype=float), where=vol > 0
+        )
+        flat = ~(vol > 0)
+        if flat.any():
+            # Нулевой риск при ненулевой доходности — бесконечно хорошее отношение: имя должно
+            # уходить на край рейтинга. Подставлять сырую доходность нельзя: это другая шкала,
+            # и она проигрывала бы любому отношению вида «проценты / дневной риск».
+            scores[flat] = np.where(momentum[flat] > 0, np.inf, -np.inf)
+            scores[flat & (momentum == 0)] = 0.0
+    elif kind == "residual":
+        market = np.nanmean(values, axis=1)
+        variance = float(np.nanvar(market, ddof=1))
+        if variance <= 0:
+            return momentum
+        market_return = float(np.prod(1.0 + market) - 1.0)
+        centred_market = market - market.mean()
+        centred = values - np.nanmean(values, axis=0)
+        covariance = np.nanmean(centred * centred_market[:, None], axis=0)
+        betas = covariance / variance
+        scores = momentum - betas * market_return
+        # Имя без полной истории за окно не должно выпадать из книги: берём сырую доходность.
+        scores = np.where(np.isfinite(scores), scores, momentum)
+    else:
+        raise ValueError(f"unknown signal mode: {kind!r}")
+    return scores
+
+
+def apply_daily_stop(
+    closes: pd.DataFrame,
+    longs: Sequence[str],
+    shorts: Sequence[str],
+    entry_index: int,
+    exit_index: int,
+    stop_pct: float,
+) -> int:
+    """Сдвинуть выход на день, когда дневной убыток книги пробил лимит.
+
+    Книга равновзвешена, каждая нога весит `1 / legs` своего плеча. Проверка идёт по закрытиям
+    дней: внутридневных данных в панели нет, поэтому стоп дневной по построению — выход
+    возможен только на закрытии, тогда как внутри дня убыток может быть глубже.
+    """
+    limit = stop_pct / 100.0
+    if limit <= 0 or not longs:
+        return exit_index
+    weight = 1.0 / len(longs)
+    cumulative = 0.0
+    for day_index in range(entry_index + 1, exit_index + 1):
+        row = closes.iloc[day_index]
+        previous = closes.iloc[day_index - 1]
+        long_return = float(
+            np.nansum([row[name] / previous[name] - 1.0 for name in longs]) * weight
+        )
+        short_return = float(
+            np.nansum([row[name] / previous[name] - 1.0 for name in shorts]) * weight
+        )
+        cumulative += long_return - short_return
+        if cumulative <= -limit:
+            return day_index
+    return exit_index
+
 
 @dataclass(frozen=True)
 class PanelConfig:
@@ -48,6 +136,17 @@ class PanelConfig:
     rebalance_days: int = 5
     legs: int = 4
     cost_per_side: float = 0.0005
+    # Способ ранжирования:
+    #   raw      — сырая доходность за окно (как было);
+    #   residual — доходность минус рыночная часть, оценённая по бете бумаги к равновзвешенному
+    #              рынку за то же окно (Blitz–Huij–Martens residual momentum);
+    #   volscaled — доходность на единицу собственного риска за окно.
+    # Вариант «доходность минус средняя по вселенной» не заведён намеренно: вычитание одной
+    # константы из всех оценок не меняет порядок, то есть для ранжирования это no-op.
+    signal: str = "raw"
+    # Дневной лимит убытка книги, % (0 — выключено): при пробитии период закрывается по
+    # этому дню, следующие входы — на ближайшей дате ребаланса.
+    daily_stop_pct: float = 0.0
 
     def __post_init__(self) -> None:
         if self.lookback_days < 1:
@@ -58,10 +157,18 @@ class PanelConfig:
             raise ValueError("legs must be positive")
         if self.cost_per_side < 0:
             raise ValueError("cost_per_side must not be negative")
+        if self.signal not in SIGNAL_MODES:
+            raise ValueError(f"signal must be one of {SIGNAL_MODES}, got {self.signal!r}")
+        if not 0 <= self.daily_stop_pct <= 100:
+            raise ValueError("daily_stop_pct must be in [0, 100]")
 
     @property
     def label(self) -> str:
         base = f"L{self.lookback_days}-R{self.rebalance_days}-k{self.legs}"
+        if self.signal != "raw":
+            base += f"-{self.signal[:4]}"
+        if self.daily_stop_pct:
+            base += f"-d{self.daily_stop_pct:g}"
         # Ставка входит в метку, только если отличается от стандартной: иначе одинаковые
         # метки у точек сетки, различающихся лишь издержками, склеили бы разные прогоны.
         if self.cost_per_side != 0.0005:
@@ -90,6 +197,28 @@ class PanelResult:
     config: PanelConfig
     periods: Tuple[PanelPeriod, ...]
     skipped: int = 0
+
+    def trimmed(self, drop: int = CONCENTRATION_DROP) -> Tuple[float, float]:
+        """Net и t после удаления `drop` лучших периодов — проверка на концентрацию.
+
+        Правило проекта: результат, который держится на двух-трёх периодах, подтверждённым
+        не считается. Пример замера 2026-11-21 (16 бумаг, 307 дней): momentum на 5-дневном
+        окне при 10-дневном удержании даёт net −52 % с t −2.46, после удаления трёх лучших
+        периодов — −68 % с t −4.09, то есть убыток размазан и потому устойчив. Зеркальный
+        разворот в тех же периодах даёт +47 %, но после обрезки остаётся +23 % с t 1.33:
+        он держится на трёх моментах рынка, и торговать его нельзя.
+
+        Возвращает `(net, t)` по оставшимся периодам; при нехватке периодов — нули.
+        """
+        nets = sorted(self.nets, reverse=True)[drop:]
+        if not nets:
+            return 0.0, 0.0
+        total = float(sum(nets))
+        mean = total / len(nets)
+        if len(nets) < 2:
+            return total, 0.0
+        std = float(np.std(np.asarray(nets, dtype=float), ddof=1))
+        return total, (mean / (std / len(nets) ** 0.5) if std else 0.0)
 
     @property
     def gross(self) -> float:
@@ -277,11 +406,30 @@ def run_panel(
             continue
 
         momentum = (entry[names] / past[names] - 1.0).to_numpy(dtype=float)
-        scores = np.asarray(ranker(momentum) if ranker else momentum, dtype=float)
+        if config.signal == "raw":
+            base_scores = momentum
+        else:
+            window = closes.iloc[past_index : entry_index + 1][names]
+            window_returns = window.pct_change(fill_method=None).iloc[1:]
+            base_scores = rank_scores(config.signal, momentum, window_returns)
+        # Нулевая модель перемешивает сами оценки (не сырой моментум): иначе при
+        # `residual`/`volscaled` она проверяла бы другое правило, чем фактическое.
+        scores = (
+            np.asarray(ranker(base_scores), dtype=float) if ranker is not None else base_scores
+        )
         # Сортировка с разрешением ничьих по имени: результат не должен зависеть от порядка CSV.
         order = sorted(range(len(names)), key=lambda position: (scores[position], names[position]))
         shorts = tuple(names[position] for position in order[: config.legs])
         longs = tuple(names[position] for position in order[-config.legs :])
+
+        if config.daily_stop_pct > 0:
+            stopped = apply_daily_stop(
+                closes, longs, shorts, entry_index, exit_index, config.daily_stop_pct
+            )
+            if stopped != exit_index:
+                exit_index = stopped
+                exit_date = dates[exit_index]
+                exit_row = closes.iloc[exit_index]
 
         long_returns = [(exit_row[name] / entry[name] - 1.0) for name in longs]
         short_returns = [(exit_row[name] / entry[name] - 1.0) for name in shorts]
@@ -461,14 +609,16 @@ def format_panel_markdown(
         ),
         "",
         "| Прогон | Периодов | Пропуск | Gross % | Комиссия % | Net % | Net/период % | Hit % "
-        "| t | Гейт | Max DD % |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| t | Net без 3 лучших % | t без них | Гейт | Max DD % |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in results:
+        trimmed_net, trimmed_t = result.trimmed()
         lines.append(
             f"| {result.run_name} | {len(result.periods)} | {result.skipped} | "
             f"{result.gross * 100:.2f} | {result.cost * 100:.2f} | {result.net * 100:.2f} | "
             f"{result.mean * 100:.3f} | {result.hit_rate:.1f} | {result.t_stat:.2f} | "
+            f"{trimmed_net * 100:.2f} | {trimmed_t:.2f} | "
             f"{'—' if result.ratio is None else f'{result.ratio:.2f}'} | "
             f"{result.max_drawdown * 100:.2f} |"
         )
@@ -481,6 +631,10 @@ def format_panel_markdown(
                 f"Равновзвешенная корзина тех же периодов: **{bench:.2f} %** — ориентир рынка. "
                 "Нейтральная книга не должна повторять этот результат; совпадение знака и "
                 "масштаба означает, что «нейтральность» не работает.",
+                "",
+                "`Net без 3 лучших %` — результат без трёх самых прибыльных периодов (правило "
+                "проверки на концентрацию). Если он меняет знак или t падает ниже 2, "
+                "преимущество держится на отдельных моментах рынка и подтверждённым не считается.",
             ]
         )
 
