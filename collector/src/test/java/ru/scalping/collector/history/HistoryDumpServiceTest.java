@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -31,14 +32,15 @@ class HistoryDumpServiceTest {
     Path tempDir;
 
     private HistoryDumpProperties properties(Instant to, String... instruments) {
-        return new HistoryDumpProperties(List.of(instruments), "1min", FROM, to, tempDir);
+        return new HistoryDumpProperties(List.of(instruments), "1min", FROM, to, tempDir,
+                HistoryDumpProperties.DEFAULT_REQUESTS_PER_MINUTE);
     }
 
     @Test
     void dump_singleInstrument_writesBarsAndMeta() throws IOException {
         HistoryCandleSource source = (figi, from, to, interval) ->
                 List.of(new HistoryCandle(from.plus(interval.barDuration()), 100, 101, 99, 100.5, 5));
-        HistoryDumpService service = new HistoryDumpService(loader, source, writer);
+        HistoryDumpService service = new HistoryDumpService(loader, source, writer, RequestPacer.unlimited());
 
         List<DumpReport> reports = service.dump(properties(FROM.plusSeconds(180), "SBER"));
 
@@ -54,7 +56,7 @@ class HistoryDumpServiceTest {
     void dump_twoInstruments_writesFilePerInstrument() throws IOException {
         HistoryCandleSource source = (figi, from, to, interval) ->
                 List.of(new HistoryCandle(from.plus(interval.barDuration()), 100, 101, 99, 100.5, 5));
-        HistoryDumpService service = new HistoryDumpService(loader, source, writer);
+        HistoryDumpService service = new HistoryDumpService(loader, source, writer, RequestPacer.unlimited());
 
         List<DumpReport> reports = service.dump(properties(FROM.plusSeconds(60), "SBER", "SiZ6@SPBFUT"));
 
@@ -70,7 +72,7 @@ class HistoryDumpServiceTest {
             requestedRanges.add(from + "/" + to);
             return List.of(new HistoryCandle(from.plus(interval.barDuration()), 100, 101, 99, 100.5, 5));
         };
-        HistoryDumpService service = new HistoryDumpService(loader, source, writer);
+        HistoryDumpService service = new HistoryDumpService(loader, source, writer, RequestPacer.unlimited());
 
         service.dump(properties(FROM.plusSeconds(3L * 24 * 3600), "SBER"));
 
@@ -82,13 +84,33 @@ class HistoryDumpServiceTest {
     @Test
     void dump_emptyHistory_reportsEmptyAndWritesNoFile() throws IOException {
         HistoryCandleSource source = (figi, from, to, interval) -> List.of();
-        HistoryDumpService service = new HistoryDumpService(loader, source, writer);
+        HistoryDumpService service = new HistoryDumpService(loader, source, writer, RequestPacer.unlimited());
 
         List<DumpReport> reports = service.dump(properties(FROM.plusSeconds(60), "SBER"));
 
         assertThat(reports.get(0).isEmpty()).isTrue();
         assertThat(reports.get(0).path()).isNull();
         assertThat(tempDir.resolve("SBER_1min.csv")).doesNotExist();
+    }
+
+    /** Пейсер вызывается перед каждым запросом: иначе пачка страниц упирается в лимит API. */
+    @Test
+    void dump_severalPages_awaitsPacerBeforeEveryRequest() throws IOException {
+        List<String> events = new ArrayList<>();
+        HistoryCandleSource source = (figi, from, to, interval) -> {
+            events.add("fetch");
+            return List.of(new HistoryCandle(from.plus(interval.barDuration()), 100, 101, 99, 100.5, 5));
+        };
+        AtomicLong clock = new AtomicLong();
+        RequestPacer pacer = RequestPacer.perMinute(60, clock::get, nanos -> {
+            events.add("wait");
+            clock.addAndGet(nanos);
+        });
+        HistoryDumpService service = new HistoryDumpService(loader, source, writer, pacer);
+
+        service.dump(properties(FROM.plusSeconds(3L * 24 * 3600), "SBER"));
+
+        assertThat(events).containsExactly("fetch", "wait", "fetch", "wait", "fetch");
     }
 
     @Test

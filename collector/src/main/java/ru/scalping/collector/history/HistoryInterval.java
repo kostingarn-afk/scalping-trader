@@ -18,7 +18,8 @@ import java.util.Optional;
 public enum HistoryInterval {
     ONE_MIN("1min", 1, Duration.ofDays(1)),
     FIVE_MIN("5min", 5, Duration.ofDays(7)),
-    FIFTEEN_MIN("15min", 15, Duration.ofDays(30)),
+    // Документированный максимум для 15-минутных свечей — 3 недели; 30 дней API отклоняет.
+    FIFTEEN_MIN("15min", 15, Duration.ofDays(21)),
     HOUR("1h", 60, Duration.ofDays(30));
 
     private final String code;

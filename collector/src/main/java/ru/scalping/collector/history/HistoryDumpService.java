@@ -40,13 +40,16 @@ public class HistoryDumpService {
     private final InstrumentLoader instrumentLoader;
     private final HistoryCandleSource candleSource;
     private final HistoryCsvWriter csvWriter;
+    private final RequestPacer requestPacer;
 
     public HistoryDumpService(InstrumentLoader instrumentLoader,
                               HistoryCandleSource candleSource,
-                              HistoryCsvWriter csvWriter) {
+                              HistoryCsvWriter csvWriter,
+                              RequestPacer requestPacer) {
         this.instrumentLoader = instrumentLoader;
         this.candleSource = candleSource;
         this.csvWriter = csvWriter;
+        this.requestPacer = requestPacer;
     }
 
     /**
@@ -70,6 +73,7 @@ public class HistoryDumpService {
                 interval.maxPageSpan());
         List<HistoryCandle> candles = new ArrayList<>();
         for (HistoryRange.Page page : pages) {
+            requestPacer.await();
             candles.addAll(candleSource.fetch(instrument.figi(), page.from(), page.to(), interval));
         }
         List<HistoryCandle> unique = dedupeAndSort(candles);

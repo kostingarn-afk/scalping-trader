@@ -37,4 +37,19 @@ class HistoryIntervalTest {
     void maxPageSpan_oneMinute_isOneDay() {
         assertThat(HistoryInterval.ONE_MIN.maxPageSpan()).isEqualTo(Duration.ofDays(1));
     }
+
+    /**
+     * Окно одного запроса не должно превышать документированный максимум T-Invest:
+     * 1 мин — 1 день, 5 мин — неделя, 15 мин — 3 недели, 1 час — 3 месяца.
+     *
+     * <p>Ровно 3 недели у 15-минутки — исправление дефекта: стояло 30 дней, и такой запрос
+     * API отклоняет.
+     */
+    @Test
+    void maxPageSpan_doesNotExceedApiLimits() {
+        assertThat(HistoryInterval.ONE_MIN.maxPageSpan()).isEqualTo(Duration.ofDays(1));
+        assertThat(HistoryInterval.FIVE_MIN.maxPageSpan()).isEqualTo(Duration.ofDays(7));
+        assertThat(HistoryInterval.FIFTEEN_MIN.maxPageSpan()).isEqualTo(Duration.ofDays(21));
+        assertThat(HistoryInterval.HOUR.maxPageSpan()).isLessThanOrEqualTo(Duration.ofDays(90));
+    }
 }
