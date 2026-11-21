@@ -252,7 +252,7 @@ def _exits_block(results: Sequence[BacktestResult]) -> List[str]:
 def _leaders_block(results: Sequence[BacktestResult]) -> List[str]:
     """Таблица лучших прогонов по итогу — только когда конфигурации действительно различаются.
 
-    Порог плана (`to_do.md` §3): кандидат интересен, если gross покрывает комиссию
+    Порог плана (`to_do.md` §1): кандидат интересен, если gross покрывает комиссию
     (отношение ≥ 1) и итог положителен. Один положительный итог без запаса по издержкам — шум.
     """
     if not results or len({result.label for result in results}) < 2:
@@ -283,7 +283,7 @@ def _leaders_block(results: Sequence[BacktestResult]) -> List[str]:
     lines.extend(
         [
             "",
-            "Гейт (`to_do.md` §3): конфигурация — кандидат только при Gross/комиссия ≥ 1 "
+            "Гейт (`to_do.md` §1): конфигурация — кандидат только при Gross/комиссия ≥ 1 "
             "и положительном итоге; меньше — издержки съедают преимущество.",
             "",
         ]

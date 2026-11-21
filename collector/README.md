@@ -174,8 +174,8 @@ Prometheus добавляет к scrape-таргету метку `service="coll
 > **Требование: глубина выгрузки — не более 1 года.** Период старше одного года не запрашивается
 > из T-Invest API ни рабочим прогоном, ни пробным запросом «узнать доступную глубину»: ограничение
 > действует для всех модулей и профилей (`AGENTS.md` §7). Потребность в длинном ряду решается
-> накоплением собственной истории, а не глубиной запроса — следствия для плана в `to_do.md`,
-> раздел «Открытые задачи». Кодом глубина не проверяется: по периоду `HistoryDumpProperties` валидирует
+> накоплением собственной истории, а не глубиной запроса — следствия для плана в `to_do.md` §5.1.
+> Кодом глубина не проверяется: по периоду `HistoryDumpProperties` валидирует
 > только `from < to`, так что ограничение держится на дисциплине запуска.
 
 ```bash
@@ -193,10 +193,10 @@ mvn -pl collector spring-boot:run \
 | `collector.history.instruments` | да | — | `TICKER` или `TICKER@CLASS` через запятую |
 | `collector.history.interval` | нет | `1min` | `1min`, `5min`, `15min`, `1h` |
 | `collector.history.from` / `to` | да | — | ISO-8601 UTC, `from < to`; конец исключителен |
-| `collector.history.out-dir` | нет | `../data/history` (в коде — `data/history`) | каталог CSV; env `HISTORY_OUT_DIR` |
+| `collector.history.out-dir` | нет | `../data/history` от каталога `collector/`, то есть `<repo>/data/history` | каталог CSV; env `HISTORY_OUT_DIR` |
 | `collector.history.requests-per-minute` | нет | `120` | предел запросов к API в минуту |
 
-**Почему 120.** Лимит песочницы — 200 unary-запросов в минуту, сервиса котировок — 600. Месяц минутных свечей — ~300 страниц; замер 2026-11-21 дал 304 страницы за 45 с ≈ 400 req/min, и API ответил `RESOURCE_EXHAUSTED` уже на второй бумаге. 120 — запас под динамический лимит.
+**Почему 120.** Лимит песочницы — 200 unary-запросов в минуту, сервиса котировок — 600. Десять месяцев минутных свечей — 304 страницы (месяц — около 30); замер 2026-11-21 дал 304 страницы за 45 с ≈ 400 req/min, и API ответил `RESOURCE_EXHAUSTED` уже на второй бумаге. 120 — запас под динамический лимит.
 
 **Лимиты одного запроса `GetCandles`** заданы в `HistoryInterval.maxPageSpan`:
 
@@ -226,9 +226,76 @@ ts,open,high,low,close,volume
 
 Файл `{ticker}_{minutes}min.csv`: `ts` — ISO-8601 UTC (время закрытия), цены без экспоненты и лишних нулей (`BigDecimal.stripTrailingZeros().toPlainString()`), объём — в лотах. Рядом sidecar `{ticker}_{minutes}min.meta.json`: обязательные `ticker`, `class_code`, `lot_size`, `interval_minutes` плюс информационные `bars`, `fetched_at`, `source` (`tinvest:GetCandles`). Файлы перезаписываются целиком — выгрузка идемпотентна. Пустая история **не создаёт файл**: Analyzer не должен увидеть выгрузку без данных.
 
+### 6.1 Повтор прогона: 10 месяцев, 1min, 20 бумаг
+
+Снимок раздела 7 получен этой командой. Запуск — в WSL/Linux из корня репозитория: в Windows
+`mvn` не установлен, а `JAVA_TOOL_OPTIONS` с TLS-корнем нужен и здесь (корневой `README.md`,
+«Окружение T-Invest»).
+
+```bash
+export T_INVEST_TOKEN="t.…"                 # сырой токен, без префикса Bearer
+export T_INVEST_SANDBOX=true
+export JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=/usr/local/share/scalping-truststore.p12 \
+  -Djavax.net.ssl.trustStorePassword=changeit"
+export INSTRUMENTS="$TICKER1,$TICKER2"      # состав сессии; подставить тикеры задачи
+export HISTORY_OUT_DIR="$(pwd)/data/history-1min"
+
+mvn -pl collector spring-boot:run \
+  -Dspring-boot.run.profiles=history-dump \
+  -Dspring-boot.run.arguments="--collector.history.instruments=$INSTRUMENTS \
+    --collector.history.interval=1min \
+    --collector.history.from=2026-01-21T00:00:00Z \
+    --collector.history.to=2026-11-21T00:00:00Z"
+```
+
+`HISTORY_OUT_DIR` можно не задавать, а передать `--collector.history.out-dir=...` — результат
+тот же. Без переопределения файлы уйдут в `<repo>/data/history`: рабочий каталог приложения —
+`collector/`, поэтому дефолт `../data/history` разворачивается от него.
+
+**Один запуск — один интервал.** `collector.history.interval` — строка, а не список, поэтому
+для нескольких таймфреймов нужен отдельный прогон на каждый. Каталоги нужно разделять:
+`loader.scan_dir` грузит все `*.csv` из каталога, и четыре интервала в одном месте дадут четыре
+датасета на тикер. `--data-dir` бэктеста, соответственно, указывает на один интервал:
+
+```bash
+for iv in 1min 5min 15min 1h; do
+  HISTORY_OUT_DIR="$(pwd)/data/history-$iv" mvn -pl collector spring-boot:run \
+    -Dspring-boot.run.profiles=history-dump \
+    -Dspring-boot.run.arguments="--collector.history.instruments=$INSTRUMENTS \
+      --collector.history.interval=$iv \
+      --collector.history.from=2026-01-21T00:00:00Z \
+      --collector.history.to=2026-11-21T00:00:00Z"
+done
+```
+
+**Сколько это занимает.** На минутном ряду страница — сутки: 304 страницы на бумагу, 6 080
+запросов на 20 бумаг. При 120 req/min это ≈ 51 минута плюс время ответов; объём результата —
+~273 МБ. Поднимать `requests-per-minute` выше 200 нельзя: это лимит песочницы, ответ —
+`RESOURCE_EXHAUSTED` и `exit 1` без resume.
+
+**Проверка результата.** Код возврата `0` означает «все инструменты непустые», но полноту ряда
+не гарантирует. Вывод прогона перенаправить в файл (`... > dump.log 2>&1`) и сверить:
+
+```bash
+ls data/history-1min/*_1min.csv | wc -l                                  # 20
+awk -F, 'FNR > 1 { n++ } END { print n }' data/history-1min/*_1min.csv   # 5 670 963
+jq -s 'map(.bars) | add' data/history-1min/*_1min.meta.json              # то же число, если есть jq
+jq -r '.fetched_at' data/history-1min/*_1min.meta.json | sort | head -1  # не раньше начала прогона
+grep 'History gaps' dump.log                                             # пропуски по дням
+```
+
+Перед повторным прогоном после сбоя каталог нужно очистить (`rm data/history-1min/*`): выгрузка
+перезаписывает файлы целиком, но не удаляет те, что остались от прошлой попытки, — проверки
+выше иначе пройдут на смеси старых и новых файлов.
+
+**При `RESOURCE_EXHAUSTED`.** Выгрузка падает целиком с `exit 1`, resume нет — перезапускать
+нужно с тем же `from`. Снизить нагрузку можно только через `requests-per-minute`: ниже 120 —
+медленнее, но безопаснее.
+
 ## 7. Выгруженный датасет — снимок 2026-11-21
 
-Инвентаризация `data/history-1min/` (в git не входит, `data/` в `.gitignore`). Период
+Инвентаризация `data/history-1min/` (в git не входит, `data/` в `.gitignore`); каталог задан
+`HISTORY_OUT_DIR` из команды 6.1. Период
 **2026-01-21 … 2026-11-21** (правая граница не включается: последний бар закрывается
 2026-11-20 в 23:59 UTC), минутные свечи, 20 бумаг, **5 670 963 бара**, ~273 МБ.
 

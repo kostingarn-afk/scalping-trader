@@ -272,7 +272,7 @@ class PanelResult:
 
     @property
     def ratio(self) -> Optional[float]:
-        """gross / комиссия — гейт `to_do.md` §3 (≥ 1)."""
+        """gross / комиссия — гейт `to_do.md` §1 (≥ 1)."""
         return self.gross / self.cost if self.cost else None
 
     @property
@@ -324,7 +324,7 @@ class PanelNull:
 def build_daily_closes(datasets: Sequence[HistoryDataset]) -> pd.DataFrame:
     """Матрица закрытий по торговым дням: индекс — дата, столбцы — тикеры.
 
-    Из часовых баров берётся последнее закрытие дня. Дни, в которые инструмент не торговался,
+    Из баров выгрузки берётся последнее закрытие дня. Дни, в которые инструмент не торговался,
     остаются `NaN` — заполнять их нельзя: пропуск торгов и нулевая доходность это разные факты.
     """
     columns: Dict[str, pd.Series] = {}
