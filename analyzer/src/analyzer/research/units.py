@@ -18,10 +18,26 @@ MINUTES = "minutes"
 COUNT = "count"
 BPS = "bps"
 LOG_PRICE = "log_price"
+LOG_PRICE_SQRT_MIN = "log_price/sqrt(min)"
+LOG_RETURNS = "log_returns"
+LOG_RETURNS_SQ = "log2_returns"
 
 #: Закрытый список: свободный текст не ловит опечатку (`tick` вместо `ticks`).
 ALLOWED_UNITS: frozenset[str] = frozenset(
-    {TICKS, MINUTE_INVERSE, PCT, RUB, RATIO, MINUTES, COUNT, BPS, LOG_PRICE}
+    {
+        TICKS,
+        MINUTE_INVERSE,
+        PCT,
+        RUB,
+        RATIO,
+        MINUTES,
+        COUNT,
+        BPS,
+        LOG_PRICE,
+        LOG_PRICE_SQRT_MIN,
+        LOG_RETURNS,
+        LOG_RETURNS_SQ,
+    }
 )
 
 #: Единицы по умолчанию для типовых величин исследования.
@@ -181,6 +197,9 @@ __all__ = [
     "COUNT",
     "EXPECTED_UNITS",
     "LOG_PRICE",
+    "LOG_PRICE_SQRT_MIN",
+    "LOG_RETURNS",
+    "LOG_RETURNS_SQ",
     "MINUTES",
     "MINUTE_INVERSE",
     "PCT",

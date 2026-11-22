@@ -179,7 +179,7 @@ Flyway-миграции применяет Trader при старте; Kafka-т�
 # change заархивирован 2026-11-11; команды ниже — для новых изменений
 openspec status --change <change-id> --json
 openspec instructions apply --change <change-id> --json
-openspec validate <change-id>                   # в CLI 2.0.0 опции --change нет: имя позиционное
+openspec validate <change-id>                   # validate/archive: имя позиционное (все прочие — --change)
 openspec archive <change-id>                    # после ревью; --yes для неинтерактивного режима
 ```
 

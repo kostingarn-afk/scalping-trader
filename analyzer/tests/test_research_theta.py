@@ -21,6 +21,7 @@ from analyzer.research.theta import (
     ThetaFit,
     ThetaPoint,
     VarianceFit,
+    _band_bounds,
     _session_series,
     _session_sums,
     _select_estimate,
@@ -473,12 +474,69 @@ def test_select_estimate_uses_intercept_when_slope_is_significant():
     assert theta == pytest.approx(0.05)
 
 
-def test_select_estimate_reports_plateau_method_flag():
-    fit = _fit()
+def test_band_uses_97_5_as_upper_percentile():
+    """Верхняя граница полосы — 97.5-й перцентиль, а не 98.75-й (регресс двустороннего CI)."""
+    bounds = _band_bounds(list(range(1, 101)))
 
-    assert fit.method in (PLATEAU, REG)
-    if fit.method == PLATEAU:
-        assert fit.flags["method"].startswith("PLATEAU")
+    assert bounds is not None
+    low, high = bounds
+    # линейная интерполяция по значениям 1..100: 2.5 → 3.475, 97.5 → 97.525
+    assert low == pytest.approx(3.475)
+    assert high == pytest.approx(97.525)
+    assert _band_bounds([]) is None
+
+
+def test_theta_used_falls_back_to_acf_when_variance_unidentified():
+    fit = ThetaFit(
+        theta=0.008,
+        slope=0.0,
+        noise_ratio=0.0,
+        intercept_ci=(0.007, 0.009),
+        slope_ci=(-0.1, 0.1),
+        method=REG,
+        points=(),
+        variance=VarianceFit(
+            theta=1e-5, amplitude=1.0, two_omega_sq=0.0, points=(), identified=False
+        ),
+    )
+
+    assert fit.theta_used == pytest.approx(0.008)
+
+
+def test_fit_ou_flags_sigma_divergence_and_conservative_attenuation():
+    bars = _ou_bars(0.05, sigma=0.002)
+    fit = _fit()
+    # σ² = A·θ моделируем заведомо малым: расхождение с наивной σ обязано попасть в флаг
+    assert fit.variance is not None
+    skewed = VarianceFit(
+        theta=fit.variance.theta,
+        amplitude=fit.variance.amplitude / 4.0,
+        two_omega_sq=fit.variance.two_omega_sq,
+        points=fit.variance.points,
+        identified=True,
+    )
+    import dataclasses
+
+    patched = dataclasses.replace(fit, variance=skewed, slope_ci=(-0.01, 0.02))
+
+    ou = fit_ou("TEST", bars, _schedule(), patched)
+
+    assert "sigma" in ou.flags
+    assert "LOW_CONFIDENCE" in ou.flags["sigma"]
+    assert ou.flags.get("attenuation", "").startswith("CONSERVATIVE")
+
+
+def test_gate1_reports_missing_variance():
+    reasons, _ = evaluate_gate1(
+        theta=0.06,
+        theta_ci=(0.05, 0.07),
+        t_half_ci=(9.9, 13.0),
+        method=REG,
+        variance=None,
+        band=_band(),
+    )
+
+    assert any("дисперсионная оценка не построена" in reason for reason in reasons)
 
 
 def test_fit_ou_parameters():

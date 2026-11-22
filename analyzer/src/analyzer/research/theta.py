@@ -200,6 +200,9 @@ class ThetaFit:
     variance: Optional[VarianceFit] = None
     band: Optional[NullBand] = None
     reasons: Tuple[str, ...] = ()
+    #: Число торговых окон в окне оценки. Заполняется независимо от полосы: иначе при
+    #: коротком окне в артефакте не видно, сколько данных вообще было.
+    sessions: int = 0
 
     @property
     def t_half(self) -> float:
@@ -216,8 +219,13 @@ class ThetaFit:
 
     @property
     def theta_used(self) -> float:
-        """θ для OU-параметров: дисперсионная оценка, если она построена."""
-        if self.variance is not None and self.variance.theta > 0:
+        """θ для OU-параметров.
+
+        Дисперсионная оценка используется только если она идентифицирована: значение на границе
+        сетки — предел перебора, и в отчёте оно читалось бы как «θ ≈ 0». В этом случае
+        берётся ACF-оценка, а флаг `UNIDENTIFIED` остаётся в `flags`.
+        """
+        if self.variance is not None and self.variance.theta > 0 and self.variance.identified:
             return self.variance.theta
         return self.theta
 
@@ -245,6 +253,7 @@ class ThetaFit:
             "gate1": self.verdict,
             "gate1_reasons": list(self.reasons),
             "method": self.method,
+            "sessions": self.sessions,
             "points": [point.to_dict() for point in self.points],
             "variance_estimate": None if self.variance is None else self.variance.to_dict(),
             "null_band": None if self.band is None else self.band.to_dict(),
@@ -421,6 +430,7 @@ def estimate_theta(
             variance=variance,
             band=band,
             reasons=("NO_DATA: меньше двух точек для регрессии",),
+            sessions=len(sessions),
         )
 
     intercept, slope = _ols_points(points)  # type: ignore[misc]
@@ -460,6 +470,7 @@ def estimate_theta(
             variance=variance,
             band=band,
             reasons=("NO_DATA: bootstrap не дал ни одной оценки",),
+            sessions=len(sessions),
         )
     if len(intercepts) < 20:
         flags["bootstrap"] = f"LOW_CONFIDENCE: {len(intercepts)} ресамплов"
@@ -484,6 +495,7 @@ def estimate_theta(
         points=tuple(points),
         variance=variance,
         band=band,
+        sessions=len(sessions),
     )
     reasons, gate_flags = evaluate_gate1(
         theta=probe.theta,
@@ -508,6 +520,7 @@ def estimate_theta(
         variance=variance,
         band=band,
         reasons=reasons,
+        sessions=probe.sessions,
     )
 
 
@@ -829,9 +842,9 @@ def _null_band_cached(
             variance_thetas.append(fit.theta)
 
     return NullBand(
-        acf_intercept=_percentile(intercepts, BAND_PERCENTILE),
-        acf_plateau=_percentile(plateaus, BAND_PERCENTILE),
-        variance=_percentile(variance_thetas, BAND_PERCENTILE),
+        acf_intercept=_band_bounds(intercepts),
+        acf_plateau=_band_bounds(plateaus),
+        variance=_band_bounds(variance_thetas),
         replications=reps,
         sessions=sessions,
     )
@@ -923,17 +936,31 @@ def _select_estimate(
 
 
 def _percentile(
-    values: Sequence[float], percentile: float
+    values: Sequence[float], level: float
 ) -> Optional[Tuple[float, float]]:
-    """Двусторонний интервал уровня `percentile`; `None`, если реплик нет.
+    """Двусторонний интервал уровня `level` (95 → 2.5/97.5); `None`, если реплик нет.
 
     `None` — не «нулевая полоса»: пустой набор значений означает «интервал не построен»,
     и вызывающая сторона обязана это обработать, а не сравнить оценку с нулём.
     """
     if not values:
         return None
-    tail = (100.0 - percentile) / 2.0
+    tail = (100.0 - level) / 2.0
     low, high = np.percentile(np.asarray(values, dtype=float), [tail, 100.0 - tail])
+    return (float(low), float(high))
+
+
+def _band_bounds(values: Sequence[float]) -> Optional[Tuple[float, float]]:
+    """Границы нулевой полосы: 97.5 — это ВЕРХНИЙ перцентиль, а не уровень интервала.
+
+    Отдельная функция, потому что спутать две семантики легко: двусторонний интервал уровня
+    97.5 сузил бы хвосты до 1.25/98.75 и расширил полосу.
+    """
+    if not values:
+        return None
+    low, high = np.percentile(
+        np.asarray(values, dtype=float), [100.0 - BAND_PERCENTILE, BAND_PERCENTILE]
+    )
     return (float(low), float(high))
 
 

@@ -204,6 +204,24 @@ def test_theta_rejects_short_null_reps(data_dir: Path, tmp_path: Path):
     assert code == 2
 
 
+def test_theta_rejects_out_of_range_weeks(data_dir: Path, tmp_path: Path):
+    for weeks in ("1", "12", "-1"):
+        code = main(
+            [
+                "theta",
+                "--data-dir",
+                str(data_dir),
+                "--out",
+                str(tmp_path / "out"),
+                "--registry",
+                str(tmp_path / "registry.jsonl"),
+                "--weeks",
+                weeks,
+            ]
+        )
+        assert code == 2, weeks
+
+
 def test_theta_writes_artifacts_even_when_gate_fails(data_dir: Path, tmp_path: Path):
     """40 баров — мало для регрессии: Gate 1 не пройден, но артефакты обязаны быть записаны."""
     out = tmp_path / "out"

@@ -39,7 +39,15 @@ from .theta import (
     estimate_theta,
     fit_ou,
 )
-from .units import COUNT, LOG_PRICE, MINUTE_INVERSE, MINUTES, RATIO, TICKS
+from .units import (
+    COUNT,
+    LOG_PRICE,
+    LOG_PRICE_SQRT_MIN,
+    MINUTE_INVERSE,
+    MINUTES,
+    RATIO,
+    TICKS,
+)
 from .variance import (
     DeseasonResult,
     VarianceError,
@@ -425,9 +433,19 @@ def _run_theta(
     if args.null_reps < 50:
         print("ошибка ввода: --null-reps должен быть не меньше 50", file=sys.stderr)
         return EXIT_INPUT
-    if args.weeks < 0:
-        print("ошибка ввода: --weeks должен быть неотрицательным", file=sys.stderr)
+    # Окно оценки объявлено спекой как 4–8 недель; 0 — явно диагностический режим.
+    # Промежуточные значения (1–3 недели, больше 8) не являются ни отчётными, ни диагностикой
+    # и могли бы просочиться в отчёт как «trailing-weeks».
+    if args.weeks != 0 and not 4 <= args.weeks <= 8:
+        print(
+            "ошибка ввода: --weeks допускает 0 (вся история) или 4–8 недель",
+            file=sys.stderr,
+        )
         return EXIT_INPUT
+
+    slices = [(dataset, *_estimation_slice(dataset, args.weeks)) for dataset in datasets]
+    estimation_from = min(str(window.get("from")) for _, _, window in slices)
+    estimation_to = max(str(window.get("to")) for _, _, window in slices)
 
     registry_path = args.registry or (args.out / "registry.jsonl")
     registry = TrialRegistry(registry_path)
@@ -440,6 +458,9 @@ def _run_theta(
                 "frame": f"{datasets[0].interval_minutes}min",
                 "window": _window(datasets),
                 "estimation_weeks": args.weeks,
+                "estimation_from": estimation_from,
+                "estimation_to": estimation_to,
+                "escalated": bool(args.escalate),
                 "deltas": list(deltas),
                 "bootstrap": args.bootstrap,
                 "null_reps": args.null_reps,
@@ -453,8 +474,7 @@ def _run_theta(
 
     entries: List[Dict[str, object]] = []
     flags: Dict[str, str] = {}
-    for dataset in datasets:
-        bars, estimation_window = _estimation_slice(dataset, args.weeks)
+    for dataset, bars, estimation_window in slices:
         try:
             fit = estimate_theta(
                 bars,
@@ -471,7 +491,7 @@ def _run_theta(
                     "instrument": dataset.instrument.name,
                     "bars": len(bars),
                     "estimation_window": estimation_window,
-                    "sessions": None,
+                    "sessions": 0,
                     "gate1": "THETA_UNDEFINED",
                     "gate1_reasons": [str(exc)],
                     "ou_fit": None,
@@ -491,7 +511,6 @@ def _run_theta(
             "instrument": dataset.instrument.name,
             "bars": len(bars),
             "estimation_window": estimation_window,
-            "sessions": None if fit.band is None else fit.band.sessions,
             "gate1": fit.verdict,
             **fit.to_dict(),
         }
@@ -509,13 +528,16 @@ def _run_theta(
             )
         if fit.gate1_passed:
             try:
-                entry["ou_fit"] = fit_ou(
+                ou = fit_ou(
                     dataset.instrument.name,
                     bars,
                     schedule,
                     fit,
                     registry_id=trial.id,
-                ).to_dict()
+                )
+                entry["ou_fit"] = ou.to_dict()
+                for key, value in ou.flags.items():
+                    flags[f"{key}:{dataset.instrument.name}"] = value
             except ThetaError as exc:
                 entry["gate1"] = "THETA_UNDEFINED"
                 entry["ou_fit"] = None
@@ -656,8 +678,8 @@ def _run_theta(
                 units={
                     "theta": MINUTE_INVERSE,
                     "horizon": MINUTES,
-                    "sigma": RATIO,
-                    "sigma_p": RATIO,
+                    "sigma": LOG_PRICE_SQRT_MIN,
+                    "sigma_p": LOG_PRICE,
                     "mu": LOG_PRICE,
                     "count": COUNT,
                 },
@@ -666,12 +688,16 @@ def _run_theta(
                     for entry in entries
                     if entry.get("ou_fit")
                 }
-                or {"fitted": 0},
+                or {"instruments": 0},
                 method=(
                     "σ² из дисперсионной модели (A·θ), σ_P = σ/√(2θ_used), "
                     "μ — среднее лог-цены в окнах; ρ_model — диагностика"
                 ),
-                flags={key: value for key, value in flags.items() if key.startswith("sigma")},
+                flags={
+                    key: value
+                    for key, value in flags.items()
+                    if key.startswith(("sigma:", "attenuation:"))
+                },
                 payload={
                     "trial_id": trial.id,
                     "instruments": [
@@ -745,7 +771,10 @@ def _format_theta(
     lines.append("|---|---|---|---|---|---|---|---|")
     for entry in entries:
         band = entry.get("null_band") or {}
-        acf_band = band.get("acf_intercept") if isinstance(band, dict) else None
+        # Для PLATEAU сравнение идёт с полосой плато — печатать полосу интерсепта вводило бы
+        # в заблуждение: у двух методов верхние границы разные.
+        key = "acf_plateau" if entry.get("method") == "PLATEAU" else "acf_intercept"
+        acf_band = band.get(key) if isinstance(band, dict) else None
         var_band = band.get("variance") if isinstance(band, dict) else None
         ci = entry.get("theta_ci") or [None, None]
         lines.append(
@@ -787,19 +816,23 @@ def _format_theta(
 
     lines.append("## OU-параметры")
     lines.append("")
-    lines.append("| Инструмент | θ used | σ | σ_P | μ | attenuation | ρ_model(10) |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append(
+        "| Инструмент | θ used | σ (модель) | σ наивная | σ_P | μ | attenuation "
+        "| ρ_model(10) | Флаги |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     fitted = [entry for entry in entries if entry.get("ou_fit")]
     for entry in fitted:
         ou = entry["ou_fit"]
         rho_ten = (ou.get("rho_model") or {}).get("10")
+        ou_flags = "; ".join(f"{key}: {value}" for key, value in (ou.get("flags") or {}).items())
         lines.append(
             f"| {entry['instrument']} | {_fmt(ou.get('theta_used'))} | {_fmt(ou.get('sigma'))} "
-            f"| {_fmt(ou.get('sigma_p'))} | {_fmt(ou.get('mu'))} "
-            f"| {_fmt(ou.get('attenuation'))} | {_fmt(rho_ten)} |"
+            f"| {_fmt(ou.get('sigma_naive'))} | {_fmt(ou.get('sigma_p'))} | {_fmt(ou.get('mu'))} "
+            f"| {_fmt(ou.get('attenuation'))} | {_fmt(rho_ten)} | {ou_flags or '—'} |"
         )
     if not fitted:
-        lines.append("| — | — | — | — | — | — | — |")
+        lines.append("| — | — | — | — | — | — | — | — | — |")
     return "\n".join(lines)
 
 

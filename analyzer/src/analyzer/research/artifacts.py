@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Mapping
 
+from .units import ALLOWED_UNITS
+
 REQUIRED_KEYS = ("units", "n", "method", "flags")
 
 
@@ -47,6 +49,14 @@ def validate_artifact(artifact: Mapping[str, object]) -> None:
         value = artifact.get(key)
         if not isinstance(value, Mapping) or not value:
             raise ArtifactError(f"artifact {key} must be a non-empty mapping")
+    # Единицы сверяются с закрытым списком: опечатка (`tick` вместо `ticks`) иначе проходит
+    # молча, а контракт §2 как раз про это.
+    unknown = {str(unit) for unit in artifact["units"].values()} - ALLOWED_UNITS  # type: ignore[union-attr]
+    if unknown:
+        raise ArtifactError(
+            f"artifact uses unknown units: {', '.join(sorted(unknown))}; "
+            f"allowed: {', '.join(sorted(ALLOWED_UNITS))}"
+        )
     flags = artifact.get("flags")
     if not isinstance(flags, Mapping):
         raise ArtifactError("artifact flags must be a mapping (may be empty)")
