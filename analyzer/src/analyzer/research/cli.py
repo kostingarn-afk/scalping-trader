@@ -15,7 +15,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from ..backtest.loader import HistoryDataset, scan_dir
 from .artifacts import build_artifact, collect_flags
 from .costs import CostEstimate, estimate_cost
+from .gate0a import (
+    DEFAULT_TAUS as GATE_TAUS,
+    PhiStarTable,
+    build_phi_star_table,
+    format_markdown as format_gate_markdown,
+)
+from .gate0a import build_artifact as build_gate_artifact
 from .integrity import CRITICAL, IntegrityReport, check_integrity
+from .policy import load_policy
 from .registry import RegistryError, TrialRegistry
 from .sessions import SessionSchedule
 from .ticks import TickSize, TickSizeError, describe, resolve_tick_size
@@ -27,6 +35,7 @@ from .variance import (
     deseasonalize_returns,
     estimate_variances,
     sigma_tau,
+    variance_ratio,
     variance_ratio_curve,
 )
 
@@ -49,13 +58,20 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("integrity", "Gate D: целостность выгрузок"),
         ("report", "сводка: шаг цены, издержки, дисперсии, VR"),
+        ("phi-star", "Gate 0a: φ*(τ) = Cost / σ_τ"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("--data-dir", required=True, type=Path, help="каталог выгрузок")
         command.add_argument(
             "--out", required=True, type=Path, help="каталог артефактов (обязателен)"
         )
-        command.add_argument("--tariff", default="trader", help="тариф брокера")
+        command.add_argument(
+            "--tariffs",
+            "--tariff",
+            dest="tariff",
+            default="trader",
+            help="тариф брокера (как в analyzer-backtest)",
+        )
         command.add_argument(
             "--spread-bps", type=float, default=0.0, help="спред за сторону, б.п."
         )
@@ -74,6 +90,20 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--model", default=DEFAULT_MODEL, help="имя модели отчёта")
             command.add_argument(
                 "--taus", default=",".join(str(tau) for tau in DEFAULT_TAUS), help="сетка τ"
+            )
+        if name == "phi-star":
+            command.add_argument(
+                "--policy", type=Path, default=None, help="YAML с параметрами политики"
+            )
+            command.add_argument(
+                "--stress",
+                type=float,
+                default=None,
+                metavar="MULTIPLIER",
+                help="стресс издержек (например, 1.5); вердикт считается без него",
+            )
+            command.add_argument(
+                "--taus", default=",".join(str(tau) for tau in GATE_TAUS), help="сетка τ"
             )
     return parser
 
@@ -96,6 +126,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "integrity":
         return _run_integrity(args, datasets, schedule)
+    if args.command == "phi-star":
+        return _run_phi_star(args, datasets, schedule)
     return _run_report(args, datasets, schedule)
 
 
@@ -184,6 +216,110 @@ def _run_integrity(
     _write(args.out / "integrity.json", json.dumps(payload, ensure_ascii=False, indent=2))
     print(f"отчёт сохранён: {args.out / 'integrity.md'}")
     return EXIT_GATE if critical else EXIT_OK
+
+
+def _run_phi_star(
+    args: argparse.Namespace, datasets: Sequence[HistoryDataset], schedule: SessionSchedule
+) -> int:
+    taus = _parse_taus(args.taus)
+    if taus is None:
+        print(f"ошибка ввода: неверная сетка τ {args.taus!r}", file=sys.stderr)
+        return EXIT_INPUT
+    try:
+        policy, sources = load_policy(args.policy)
+    except (ValueError, OSError) as exc:
+        print(f"ошибка политики: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    if args.stress is not None and args.stress <= 0:
+        print("ошибка ввода: --stress должен быть положительным", file=sys.stderr)
+        return EXIT_INPUT
+
+    registry_path = args.registry or (args.out / "registry.jsonl")
+    registry = TrialRegistry(registry_path)
+    try:
+        trial = registry.register(
+            {
+                "model": "gate0a",
+                "frame": f"{datasets[0].interval_minutes}min",
+                "window": _window(datasets),
+                "tariff": args.tariff,
+                "spread_bps": args.spread_bps,
+                "taus": list(taus),
+                "policy": policy.to_mapping(),
+                "policy_sources": sources,
+            }
+        )
+    except RegistryError as exc:
+        print(f"ошибка реестра: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+
+    tables = []
+    flags: Dict[str, str] = {}
+    for dataset in datasets:
+        try:
+            table = _phi_star_entry(dataset, args, schedule, policy, taus)
+        except (TickSizeError, VarianceError) as exc:
+            print(f"{dataset.instrument.name}: {exc}", file=sys.stderr)
+            return EXIT_INPUT
+        tables.append(table)
+        tick = _resolve_tick(dataset)
+        if tick.flag:
+            flags[f"tick:{dataset.instrument.name}"] = tick.flag
+        if not args.spread_verified:
+            flags[f"spread:{dataset.instrument.name}"] = "UNVERIFIED"
+
+    artifact = build_gate_artifact(
+        tables,
+        trial_id=trial.id,
+        policy=dict(policy.to_mapping(), lambda_risk=round(policy.lambda_risk, 6)),
+        flags=flags,
+    )
+    markdown = format_gate_markdown(tables)
+    _write(args.out / "phi-star.md", markdown)
+    _write(args.out / "phi-star.json", json.dumps(artifact, ensure_ascii=False, indent=2))
+    verdict = artifact["payload"]["verdict"]  # type: ignore[index]
+    print(f"отчёт сохранён: {args.out / 'phi-star.md'}; вердикт: {verdict}; опыт: {trial.id}")
+    return EXIT_OK if verdict == "PASS" else EXIT_GATE
+
+
+def _phi_star_entry(
+    dataset: HistoryDataset,
+    args: argparse.Namespace,
+    schedule: SessionSchedule,
+    policy,
+    taus: Sequence[int],
+) -> PhiStarTable:
+    name = dataset.instrument.name
+    tick = _resolve_tick(dataset)
+    price = dataset.bars[-1].close
+    cost = estimate_cost(
+        price,
+        tick,
+        tariff=args.tariff,
+        spread_bps=args.spread_bps,
+        spread_verified=args.spread_verified,
+        stress=args.stress or 1.0,
+    )
+    variance = estimate_variances(dataset.bars)
+    sigma_1_log = variance.parkinson**0.5
+    deseason = deseasonalize_returns(
+        dataset.bars, schedule, min_observations=MIN_DESEASON_OBSERVATIONS
+    )
+    vr_by_tau: Dict[int, Optional[float]] = {}
+    for tau in taus:
+        try:
+            vr_by_tau[tau] = variance_ratio(deseason.returns, tau)
+        except VarianceError:
+            vr_by_tau[tau] = None
+    return build_phi_star_table(
+        name,
+        price,
+        tick.value,
+        sigma_1_log,
+        vr_by_tau,
+        cost,
+        taus=taus,
+    )
 
 
 def _run_report(
