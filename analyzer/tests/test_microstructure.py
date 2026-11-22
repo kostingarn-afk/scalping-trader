@@ -105,7 +105,12 @@ def test_state_snapshot_includes_book_and_vpin() -> None:
 def test_state_without_data_returns_empty_snapshot() -> None:
     state = MicrostructureState()
 
-    assert state.snapshot("FIGI") == {"bids_qty": [], "asks_qty": [], "vpin": None}
+    assert state.snapshot("FIGI") == {
+        "bids_qty": [],
+        "asks_qty": [],
+        "vpin": None,
+        "hawkes": None,
+    }
 
 
 def test_state_uses_tick_rule_for_unspecified_direction() -> None:

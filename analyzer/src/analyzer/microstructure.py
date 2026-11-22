@@ -11,6 +11,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
+from .hawkes import MIN_EVENTS, estimate_hawkes
+
 BUY = 1
 SELL = -1
 UNKNOWN = 0
@@ -85,17 +87,31 @@ class MicrostructureState:
     """Последний стакан и поток сделок по каждому инструменту."""
 
     def __init__(
-        self, depth: int = 10, bucket_volume: int = 1000, buckets: int = 20
+        self,
+        depth: int = 10,
+        bucket_volume: int = 1000,
+        buckets: int = 20,
+        hawkes_window: int = 500,
+        hawkes_refresh: int = 25,
     ) -> None:
         if depth <= 0:
             raise ValueError("depth must be positive")
+        if hawkes_window < MIN_EVENTS:
+            raise ValueError(f"hawkes_window must be at least {MIN_EVENTS}")
+        if hawkes_refresh < 1:
+            raise ValueError("hawkes_refresh must be positive")
         self._depth = depth
         self._bucket_volume = bucket_volume
         self._buckets = buckets
+        self._hawkes_window = hawkes_window
+        self._hawkes_refresh = hawkes_refresh
         self._books: Dict[str, _Book] = {}
         self._flows: Dict[str, VolumeBuckets] = {}
         self._last_price: Dict[str, float] = {}
         self._last_direction: Dict[str, int] = {}
+        self._trade_times: Dict[str, Deque[float]] = {}
+        self._hawkes: Dict[str, Optional[float]] = {}
+        self._trades_since_hawkes: Dict[str, int] = {}
 
     def update_book(
         self, figi: str, bids_qty: Sequence[int], asks_qty: Sequence[int]
@@ -106,7 +122,12 @@ class MicrostructureState:
         )
 
     def on_trade(
-        self, figi: str, price: float, volume: int, direction: int = UNKNOWN
+        self,
+        figi: str,
+        price: float,
+        volume: int,
+        direction: int = UNKNOWN,
+        timestamp: Optional[float] = None,
     ) -> None:
         resolved = direction
         if resolved not in (BUY, SELL):
@@ -116,6 +137,21 @@ class MicrostructureState:
         self._last_price[figi] = price
         self._last_direction[figi] = resolved
         self._flow(figi).add(volume, resolved)
+        if timestamp is not None:
+            self._add_trade_time(figi, float(timestamp))
+
+    def _add_trade_time(self, figi: str, timestamp: float) -> None:
+        times = self._trade_times.get(figi)
+        if times is None:
+            times = deque(maxlen=self._hawkes_window)
+            self._trade_times[figi] = times
+        times.append(timestamp)
+        pending = self._trades_since_hawkes.get(figi, 0) + 1
+        if pending >= self._hawkes_refresh and len(times) >= MIN_EVENTS:
+            params = estimate_hawkes(list(times))
+            self._hawkes[figi] = None if params is None else params.branching
+            pending = 0
+        self._trades_since_hawkes[figi] = pending
 
     def snapshot(self, figi: str) -> Dict[str, Any]:
         """Данные для расчёта индикаторов на завершённой свече."""
@@ -125,6 +161,7 @@ class MicrostructureState:
             "bids_qty": list(book.bids) if book is not None else [],
             "asks_qty": list(book.asks) if book is not None else [],
             "vpin": flow.vpin() if flow is not None else None,
+            "hawkes": self._hawkes.get(figi),
         }
 
     def _flow(self, figi: str) -> VolumeBuckets:

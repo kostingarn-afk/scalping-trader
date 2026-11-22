@@ -14,7 +14,7 @@ Analyzer — единственное место, где живёт правил
 - подписки на стримы и `MarketDataService.GetCandles` — ответственность Collector'а (`../AGENTS.md` §3); Analyzer получает Kafka-сообщения или CSV-выгрузку;
 - во всём пакете нет ни `tinkoff`, ни `T_INVEST_TOKEN`, ни чтения env (проверено по коду) — поэтому бэктест воспроизводим на машине без доступа к API;
 - историю для бэктеста выгружает Collector, Analyzer читает файлы (контракт — §11.1);
-- из `raw-market-data` Analyzer потребляет свечи, **стакан** и **сделки**: по стакану считается `order_imbalance`, по потоку сделок — `vpin` (§5); без стакана оба поля пусты.
+- из `raw-market-data` Analyzer потребляет свечи, **стакан** и **сделки**: по стакану считается `order_imbalance`, по потоку сделок — `vpin` и кластеризация `hawkes` (§5); без стакана и сделок эти поля пусты.
 
 Полное ТЗ — [`../docs/Техническое задание.md`](../docs/Техническое%20задание.md), обзор проекта и инфраструктура — [`../README.md`](../README.md).
 
@@ -127,9 +127,25 @@ mean reversion (z-score + RSI) разрешён только в нём, в во�
 - `hmmlearn` импортируется лениво: без него реестр и остальные модели работают, а `--strategy
   hmm` падает с понятной ошибкой.
 
-**Боевой Analyzer работает на `mean_reversion`.** `v2`, `momentum`, `ou`, `microstructure` и
-`hmm` подключены только к `analyzer-backtest`; включение модели в живой контур — отдельный шаг
-после подтверждения преимущества (docstring модулей).
+### `hawkes` (`signal_models/hawkes.py`) — production-данные
+
+Поток сделок оценивается экспоненциальным Hawkes: `λ(t) = μ + Σ α·e^{−β(t−t_i)}`,
+`branching ratio n = α/β` (`analyzer/hawkes.py`, MLE). При `n → 1` сделки идут лавиной и mean
+reversion убыточен (`docs/mat_analyze.md` §2), поэтому модель **фильтрует** вход, а не меняет
+направление.
+
+- вход mean reversion разрешён при `hawkes < branching_threshold` (по умолчанию 0.7);
+- HOLD при кластеризованном потоке, отсутствии оценки или недостатке индикаторов;
+- параметры: `--model-param branching_threshold=0.7`, пороги — `--z-entry`, `--rsi-buy/sell`;
+- пересчёт оценки — не чаще `hawkes_refresh` (25) сделок по окну `hawkes_window` (500);
+  `AnalyzerConfig.hawkes_*`; меньше 50 сделок — оценки нет.
+
+**В бэктесте модель всегда HOLD:** CSV-выгрузка Collector содержит только свечи, сделок в
+истории нет. Проверка — синтетика (Пуассон против Hawkes) и production после запуска Collector.
+
+**Боевой Analyzer работает на `mean_reversion`.** `v2`, `momentum`, `ou`, `microstructure`,
+`hmm` и `hawkes` подключены только к `analyzer-backtest` или к production-индикаторам; включение
+модели в живой контур — отдельный шаг после подтверждения преимущества (docstring модулей).
 
 ### Реестр моделей (`signal_models/`)
 
@@ -341,7 +357,7 @@ Train фиксированной длины, test — следующий бло�
 | `--max-notional-pct` | `100.0` | лимит номинала позиции, % депозита |
 | `--atr-sl` / `--atr-tp` | `1.5` / `2.0` | множители ATR для SL и TP |
 | `--tp-sl` | `` | перебор пар `TP:SL` (`2:1.5,3:2`), метка `tp3/sl2` |
-| `--strategy` | `mean_reversion` | `mean_reversion` / `v2` / `momentum` / `ou` / `microstructure` / `hmm` (из реестра `signal_models`) |
+| `--strategy` | `mean_reversion` | `mean_reversion` / `v2` / `momentum` / `ou` / `microstructure` / `hmm` / `hawkes` (из реестра `signal_models`) |
 | `--model-param` | — | параметры модели `key=value`, повторяемый (например `window=240` для `ou`) |
 | `--z-entry` | `2.0` | порог `\|z\|` в σ BB (v2, momentum) |
 | `--rsi-buy` / `--rsi-sell` | — | v2: 25/75, momentum: 65/35 (перекрывают дефолты стратегии) |

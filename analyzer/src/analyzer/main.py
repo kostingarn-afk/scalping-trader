@@ -60,6 +60,7 @@ class AnalyzerPipeline:
                 bids_qty=candle_data.get("bids_qty"),
                 asks_qty=candle_data.get("asks_qty"),
                 vpin=candle_data.get("vpin"),
+                hawkes=candle_data.get("hawkes"),
             )
             signal = mean_reversion(ind, price)
 

@@ -25,6 +25,7 @@ from .builtin import (
 from .ou import OuConfig, OuMeanReversionModel, ou_config
 from .microstructure import MicroConfig, MicrostructureModel, microstructure_config
 from .regime import HmmConfig, HmmRegimeModel, hmm_config
+from .hawkes import HawkesConfig, HawkesModel, hawkes_config
 
 
 class UnknownModelError(KeyError):
@@ -97,6 +98,16 @@ MODEL_SPECS: Mapping[str, ModelSpec] = MappingProxyType(
                 config=HmmConfig() if config is None else config
             ),
             make_config=hmm_config,
+            label=config_label,
+        ),
+        "hawkes": ModelSpec(
+            name="hawkes",
+            version=HawkesModel.version,
+            config_cls=HawkesConfig,
+            factory=lambda config: HawkesModel(
+                config=HawkesConfig() if config is None else config
+            ),
+            make_config=hawkes_config,
             label=config_label,
         ),
     }

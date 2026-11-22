@@ -132,7 +132,15 @@ def test_noop_fit_does_not_change_prediction(name: str) -> None:
 
 
 def test_registry_exposes_builtin_models() -> None:
-    assert model_names() == ("mean_reversion", "momentum", "v2", "ou", "microstructure", "hmm")
+    assert model_names() == (
+        "mean_reversion",
+        "momentum",
+        "v2",
+        "ou",
+        "microstructure",
+        "hmm",
+        "hawkes",
+    )
     assert tuple(MODEL_SPECS) == model_names()
     assert isinstance(build_model("mean_reversion"), MeanReversionModel)
     assert isinstance(build_model("momentum"), MomentumModel)

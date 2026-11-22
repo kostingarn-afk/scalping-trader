@@ -34,6 +34,9 @@ class AnalyzerConfig:
     order_book_depth: int = 10
     vpin_bucket_volume: int = 1000
     vpin_buckets: int = 20
+    # Hawkes: окно времён сделок (не меньше 50 — порог устойчивости MLE) и период пересчёта.
+    hawkes_window: int = 500
+    hawkes_refresh: int = 25
 
     def __post_init__(self) -> None:
         if self.order_book_depth <= 0:
@@ -42,6 +45,10 @@ class AnalyzerConfig:
             raise ValueError("vpin_bucket_volume must be positive")
         if self.vpin_buckets <= 0:
             raise ValueError("vpin_buckets must be positive")
+        if self.hawkes_window < 50:
+            raise ValueError("hawkes_window must be at least 50")
+        if self.hawkes_refresh <= 0:
+            raise ValueError("hawkes_refresh must be positive")
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "AnalyzerConfig":

@@ -41,6 +41,16 @@ def _to_float(quotation: Any) -> float:
     return quotation.units + quotation.nano / 1e9
 
 
+def _timestamp_seconds(message: Any) -> Optional[float]:
+    """Время события в секундах; None, если биржа время не передала.
+
+    Подставлять время получения нельзя: Hawkes оценивает поток биржи, а не задержку Kafka.
+    """
+    if not message.HasField("ts"):
+        return None
+    return message.ts.seconds + message.ts.nanos / 1e9
+
+
 def parse_message(payload: bytes) -> Optional[ParsedMessage]:
     """Разобрать `RawMarketData` в свечу, стакан или сделку.
 
@@ -89,6 +99,7 @@ def parse_message(payload: bytes) -> Optional[ParsedMessage]:
             "price": _to_float(trade.price),
             "volume": int(trade.quantity),
             "direction": _DIRECTIONS.get(int(trade.direction), UNKNOWN),
+            "ts": _timestamp_seconds(message),
         }
 
     return None
@@ -155,6 +166,8 @@ def make_handler(config: AnalyzerConfig) -> Callable[[Any], None]:
         depth=config.order_book_depth,
         bucket_volume=config.vpin_bucket_volume,
         buckets=config.vpin_buckets,
+        hawkes_window=config.hawkes_window,
+        hawkes_refresh=config.hawkes_refresh,
     )
 
     def handler(message: Any) -> None:
@@ -170,7 +183,11 @@ def make_handler(config: AnalyzerConfig) -> Callable[[Any], None]:
             return
         if kind == "trade":
             microstructure.on_trade(
-                figi, data["price"], data["volume"], data["direction"]
+                figi,
+                data["price"],
+                data["volume"],
+                data["direction"],
+                timestamp=data.get("ts"),
             )
             return
 

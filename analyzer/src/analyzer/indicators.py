@@ -32,6 +32,8 @@ class Indicators:
     atr_pct: Optional[float] = None
     # VPIN: доля дисбаланса объёмного потока (0 — сбалансирован, 1 — односторонний).
     vpin: Optional[float] = None
+    # Hawkes branching ratio: кластеризация сделок (0 — Пуассон, → 1 — «лавина»).
+    hawkes: Optional[float] = None
 
     def to_dict(self) -> Dict[str, float]:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -144,6 +146,7 @@ def compute_all(
     bids_qty: Optional[List[int]] = None,
     asks_qty: Optional[List[int]] = None,
     vpin: Optional[float] = None,
+    hawkes: Optional[float] = None,
 ) -> Indicators:
     """Расчёт всех индикаторов сразу."""
     rsi = compute_rsi(closes)
@@ -162,4 +165,5 @@ def compute_all(
         adx=adx,
         atr_pct=compute_atr_pct(atr, close),
         vpin=vpin,
+        hawkes=hawkes,
     )
