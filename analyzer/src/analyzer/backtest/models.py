@@ -11,6 +11,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, Tuple
 
+from .execution import ExecutionModel
+
 FUTURE_CLASS_CODES = frozenset({"SPBFUT", "FORTS"})
 
 
@@ -111,6 +113,8 @@ class RunConfig:
     window: int = 200
     min_candles: int = 25
     commission_profit_ratio: float = 3.0
+    # Издержки исполнения: спред и импакт к ценам входа/выхода. Нули — прежнее поведение.
+    execution: ExecutionModel = ExecutionModel()
     # Сколько баров после выхода запрещены новые входы: ограничитель оборота
     # (комиссия линейна по числу сделок, преимущество — нет).
     cooldown_bars: int = 0

@@ -18,6 +18,7 @@ import numpy as np
 from ..indicators import Indicators, compute_all, compute_atr_pct_series
 from ..strategy import Signal, SignalType, mean_reversion
 from .commission import CommissionModel
+from .execution import ExecutionModel
 from .models import (
     Bar,
     BacktestResult,
@@ -131,7 +132,7 @@ def run_backtest(
                     trades.append(
                         _close_trade(
                             position, bar, index, bar.close, ExitReason.DAILY_STOP,
-                            instrument, model,
+                            instrument, model, cfg.execution,
                         )
                     )
                     day_pnl += trades[-1].net_pnl
@@ -145,7 +146,10 @@ def run_backtest(
             if fill is not None:
                 exit_price, reason = fill
                 trades.append(
-                    _close_trade(position, bar, index, exit_price, reason, instrument, model)
+                    _close_trade(
+                        position, bar, index, exit_price, reason, instrument, model,
+                        cfg.execution,
+                    )
                 )
                 day_pnl += trades[-1].net_pnl
                 if stop_limit > 0 and day_pnl <= -stop_limit:
@@ -216,7 +220,15 @@ def run_backtest(
             skipped += 1
             index += 1
             continue
-        lots, notional = sized
+        lots, _ = sized
+        # Сайзинг считается по базовой цене, затем цена корректируется на издержки исполнения:
+        # итерация «размер ↔ цена» даёт доли процента, а цикл усложняет движок.
+        units = float(lots * instrument.lot_size)
+        fill_bar = bar_list[fill_index]
+        side = 1.0 if signal.type is SignalType.BUY else -1.0
+        entry_price = cfg.execution.fill_price(
+            entry_price, side, units, fill_bar.volume, instrument.lot_size
+        )
         position = _OpenPosition(
             direction=Direction.LONG if signal.type is SignalType.BUY else Direction.SHORT,
             entry_price=entry_price,
@@ -225,7 +237,7 @@ def run_backtest(
             entry_ts=bar_list[fill_index].ts,
             entry_index=fill_index,
             lots=lots,
-            notional=notional,
+            notional=entry_price * units,
             atr=indicators.atr,
         )
         # Бар входа обрабатывается следующей итерацией в режиме открытой позиции:
@@ -390,13 +402,18 @@ def _close_trade(
     reason: ExitReason,
     instrument: Instrument,
     model: CommissionModel,
+    execution: ExecutionModel = ExecutionModel(),
 ) -> Trade:
     units = position.lots * instrument.lot_size
     direction = 1.0 if position.direction is Direction.LONG else -1.0
-    gross = (exit_price - position.entry_price) * units * direction
+    # Закрытие длинной — продажа, короткой — покупка: поправка исполнения в сторону рынка.
+    filled_exit = execution.fill_price(
+        exit_price, -direction, units, bar.volume, instrument.lot_size
+    )
+    gross = (filled_exit - position.entry_price) * units * direction
     cost = model.round_trip(
         position.entry_price * units,
-        exit_price * units,
+        filled_exit * units,
         instrument.is_future,
         contracts=position.lots,
     )
@@ -405,7 +422,7 @@ def _close_trade(
         entry_ts=position.entry_ts,
         exit_ts=bar.ts,
         entry_price=position.entry_price,
-        exit_price=exit_price,
+        exit_price=filled_exit,
         sl=position.sl,
         tp=position.tp,
         lots=position.lots,

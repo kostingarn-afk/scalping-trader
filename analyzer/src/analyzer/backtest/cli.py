@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..signal_models import MODEL_SPECS, build_model, model_names
 from .commission import TARIFFS, CommissionModel
+from .execution import ExecutionModel
 from .engine import StrategyFn, atr_pct_quantile, run_backtest
 from .loader import HistoryDataset, aggregate, load_dataset, scan_dir
 from .models import BacktestResult, Bar, Instrument, RunConfig
@@ -205,6 +206,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--spread-bps",
+        type=float,
+        default=0.0,
+        help="половина спреда в б.п. цены: покупка дороже, продажа дешевле (0 — выключено)",
+    )
+    parser.add_argument(
+        "--impact-bps",
+        type=float,
+        default=0.0,
+        help="временный импакт Almgren–Chriss при 100 %% участии в объёме бара, б.п.",
+    )
+    parser.add_argument(
+        "--permanent-bps",
+        type=float,
+        default=0.0,
+        help="постоянный импакт Almgren–Chriss при 100 %% участии (в средней цене — с 0.5), б.п.",
+    )
+    parser.add_argument(
         "--panel-grid",
         default="",
         help="сетка панели: 'lookback_days=5,10;rebalance_days=5;legs=3,4'",
@@ -281,6 +300,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             fill_on_next_bar_open=not args.fill_on_close,
             daily_loss_stop_pct=args.daily_stop,
             entry_after_msk_minutes=_parse_msk_time(args.entry_after_msk),
+            execution=ExecutionModel(
+                spread_bps=args.spread_bps,
+                impact_bps_at_full=args.impact_bps,
+                permanent_bps_at_full=args.permanent_bps,
+            ),
         )
         walkforward = _walkforward_settings(args)
     except (FileNotFoundError, ValueError) as exc:

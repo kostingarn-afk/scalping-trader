@@ -171,6 +171,13 @@ def _parameters_line(results: Sequence[BacktestResult]) -> str:
         line += f", cooldown {first.cooldown_bars} баров"
     if first.trailing_atr:
         line += f", трейлинг {first.trailing_atr:.2f}×ATR"
+    if first.execution.enabled:
+        line += (
+            f", исполнение: спред {first.execution.spread_bps:g} б.п."
+            f" + импакт {first.execution.impact_bps_at_full:g} б.п."
+        )
+        if first.execution.permanent_bps_at_full:
+            line += f" + постоянный {first.execution.permanent_bps_at_full:g} б.п."
     line += "."
     strategy = results[0].strategy
     if strategy:
