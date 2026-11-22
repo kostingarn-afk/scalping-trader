@@ -93,7 +93,9 @@ class RiskManagerTest {
     @Test
     void commissionFilterRejectsThinTargetOnInvestorTariff() {
         RiskManager rm = new RiskManager();
+        // Ставка «Инвестора» задана явно: дефолт — «Трейдер» 0.0005 (шаг 1.9).
         // Цель 0.5 % при ставке 0.3 % за сторону: круг 0.6 %, ratio 3 → нужно 1.8 %.
+        rm.updateConfig(withCommissionRate(0.003));
         RiskCheckResult result = rm.check("SBER", 100.0, 99.0, 100.5, 1, 200_000, 0.0);
 
         assertThat(result.allowed()).isFalse();

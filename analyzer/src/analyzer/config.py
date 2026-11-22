@@ -23,7 +23,8 @@ class AnalyzerConfig:
     # Ставка брокера за сторону сделки: «Инвестор» 0.003, «Трейдер» 0.0005,
     # «Премиум» 0.0004. Отдельным полем, чтобы смена тарифа была правкой конфига,
     # а не кода (фильтр отбрасывает ~92 % сигналов на «Инвесторе» и ~8 % на «Трейдере»).
-    commission_rate_per_side: float = 0.003
+    # Дефолт — «Трейдер»: порог цели выхода 0.30 % вместо 1.8 % (шаг 1.9, to_do.md §4.1).
+    commission_rate_per_side: float = 0.0005
     db_url: str = "postgresql://scalping:scalping@localhost:5432/scalping"
     metrics_port: int = 8000
     # Сжатие producer'а trading-signals. gzip — из stdlib; lz4 требует пакета `lz4`,
@@ -49,6 +50,15 @@ class AnalyzerConfig:
             raise ValueError("hawkes_window must be at least 50")
         if self.hawkes_refresh <= 0:
             raise ValueError("hawkes_refresh must be positive")
+
+    @property
+    def required_tp_pct(self) -> float:
+        """Порог цели выхода, % от суммы сделки: `ratio × 2 × ставка` (шаг 1.9).
+
+        Цель должна покрывать хотя бы столько, иначе комиссионный фильтр отбросит сигнал;
+        фактическое кратное ATR считает `strategy.target_mult`.
+        """
+        return self.commission_profit_ratio * 2 * self.commission_rate_per_side * 100.0
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "AnalyzerConfig":

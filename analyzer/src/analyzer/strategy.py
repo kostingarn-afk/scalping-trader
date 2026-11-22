@@ -1,11 +1,13 @@
 """Стратегия mean reversion (BB + Z-score) — задача 3.4.
 
 Сигнал BUY при RSI<30 и цене≤lower BB, SELL при RSI>70 и цене≥upper BB, HOLD иначе.
-SL = entry - 1.5×ATR, TP = entry + 2×ATR.
+SL = entry - 1.5×ATR; цель выхода строится от порога комиссии (`with_target`, шаг 1.9):
+TP = entry ± k×ATR, где `k = ceil(min_tp_pct / ATR%)`, но не меньше 1.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional
 
@@ -38,7 +40,8 @@ def mean_reversion(ind: Indicators, price: float, atr_mult_sl: float = 1.5, atr_
     BUY: RSI < 30 и цена ≤ lower BB (перепроданность).
     SELL: RSI > 70 и цена ≥ upper BB (перекупленность).
     HOLD: иначе.
-    SL/TP от ATR: SL = entry ∓ 1.5×ATR, TP = entry ± 2×ATR.
+    SL от ATR: SL = entry ∓ 1.5×ATR. Целевое значение TP здесь — статическое кратное;
+    боевая и бэктестовая цель ставятся `with_target` от порога комиссии.
     """
     if ind.rsi is None or ind.bb_lower is None or ind.bb_upper is None:
         return Signal(SignalType.HOLD, 0.0, price, None, None, "insufficient data")
@@ -64,6 +67,33 @@ def mean_reversion(ind: Indicators, price: float, atr_mult_sl: float = 1.5, atr_
         return Signal(SignalType.SELL, confidence, price, sl, tp, "rsi overbought + upper BB")
 
     return Signal(SignalType.HOLD, 0.0, price, None, None, "no signal")
+
+
+def target_mult(price: float, atr: Optional[float], min_tp_pct: float) -> int:
+    """Кратное ATR для цели: покрыть `min_tp_pct` процентов цены, но не меньше 1.
+
+    `min_tp_pct` — порог комиссии в процентах от суммы сделки
+    (`commission_profit_ratio × 2 × rate_per_side × 100`).
+    """
+    if atr is None or atr <= 0 or price <= 0 or min_tp_pct <= 0:
+        return 1
+    atr_pct = 100.0 * atr / price
+    return max(1, math.ceil(min_tp_pct / atr_pct))
+
+
+def with_target(
+    signal: Signal, price: float, atr: Optional[float], min_tp_pct: float
+) -> Signal:
+    """Поставить цель `k×ATR` вместо статического кратного.
+
+    Применяется после правила входа и в production, и в бэктесте — иначе прогон перестаёт
+    воспроизводить боевое поведение. `min_tp_pct ≤ 0` и сигнал HOLD оставляют сигнал как есть.
+    """
+    if not signal.is_actionable or min_tp_pct <= 0 or atr is None or atr <= 0:
+        return signal
+    mult = target_mult(price, atr, min_tp_pct)
+    side = 1.0 if signal.type is SignalType.BUY else -1.0
+    return replace(signal, suggested_tp=round(price + side * mult * atr, 9))
 
 
 def _sl_tp(price: float, atr: Optional[float], mult: float, sign: int) -> Optional[float]:

@@ -14,7 +14,8 @@ class CommissionFilter:
     ratio: float = 3.0  # commission_profit_ratio из risk_config
     # Ставка за сторону: «Инвестор» 0.003, «Трейдер» 0.0005. Живёт в конфиге, а не в коде:
     # ставка меняет, сколько сигналов переживёт фильтр (на «Инвесторе» отсекается ~92 %).
-    rate_per_side: float = 0.003
+    # Дефолт — «Трейдер»: порог 0.30 % вместо 1.8 % (шаг 1.9).
+    rate_per_side: float = 0.0005
 
     def estimate_commission(self, price: float, quantity: int) -> float:
         """Круговая комиссия: ставка брокера за сторону × две стороны."""

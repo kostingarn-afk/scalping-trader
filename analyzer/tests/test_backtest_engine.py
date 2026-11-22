@@ -365,6 +365,35 @@ def test_tp_reported_when_enabled():
     assert trade.tp == pytest.approx(102.0)
 
 
+def test_target_policy_uses_k_atr_from_commission_threshold():
+    """min_tp_pct = 1.2 %, ATR плоского ряда 0.4 → k = 3, TP = 100 + 3×0.4."""
+    bars = _flat_bars(30)
+    bars.append(_bar(30, close=101.5, high=101.7, low=101.3))
+
+    trade = _run(bars, _config(min_tp_pct=1.2)).trades[0]
+
+    assert trade.tp == pytest.approx(101.2)
+    assert trade.exit_reason is ExitReason.TAKE_PROFIT
+
+
+def test_target_policy_disabled_keeps_static_tp():
+    bars = _flat_bars(30)
+    bars.append(_bar(30, close=102.5, high=103.0, low=101.5))
+
+    trade = _run(bars, _config(min_tp_pct=0.0)).trades[0]
+
+    assert trade.tp == pytest.approx(102.0)
+
+
+def test_target_policy_skipped_when_tp_disabled():
+    bars = _flat_bars(25)
+    bars.extend(_bar(minute, close=101.0) for minute in range(25, 41))
+
+    trade = _run(bars, _config(min_tp_pct=1.2, no_tp=True)).trades[0]
+
+    assert trade.tp is None
+
+
 def test_no_tp_ignores_target_and_holds_to_timeout():
     """Без цели цена проходит уровень TP, но позиция закрывается только таймаутом."""
     bars = _flat_bars(25)

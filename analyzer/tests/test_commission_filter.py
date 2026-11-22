@@ -28,9 +28,15 @@ def test_hold_always_rejected():
 
 
 def test_commission_estimate():
-    f = CommissionFilter(ratio=3.0)
+    # Ставка задана явно: дефолт — «Трейдер» 0.0005, а тест проверяет арифметику «Инвестора».
+    f = CommissionFilter(ratio=3.0, rate_per_side=0.003)
     # 0.3% * 100 * 1 * 2 (вход+выход) = 0.6
     assert abs(f.estimate_commission(100.0, 1) - 0.6) < 1e-9
+
+
+def test_default_tariff_is_trader():
+    """Дефолт фильтра совпадает с дефолтом конфига Analyzer: «Трейдер» (шаг 1.9)."""
+    assert CommissionFilter().estimate_commission(100.0, 1) == pytest.approx(0.1)
 
 
 def test_commission_estimate_uses_configured_tariff():

@@ -42,14 +42,14 @@ public record RiskConfig(
                 Double.parseDouble(m.getOrDefault("correlation_threshold", "0.8")),
                 Integer.parseInt(m.getOrDefault("max_trades_per_minute", "10")),
                 Integer.parseInt(m.getOrDefault("entry_after_msk_minutes", "660")),
-                Double.parseDouble(m.getOrDefault("commission_rate_per_side", "0.003")),
+                Double.parseDouble(m.getOrDefault("commission_rate_per_side", "0.0005")),
                 Double.parseDouble(m.getOrDefault("max_position_notional_pct", "100.0")),
                 Double.parseDouble(m.getOrDefault("kelly_cap_pct", "1.0"))
         );
     }
 
-    /** Значения по умолчанию (синхронны с сидом V2, дополнены V3–V5). */
+    /** Значения по умолчанию (синхронны с сидом V2, дополнены V3–V6). */
     public static RiskConfig defaults() {
-        return new RiskConfig(1.0, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.003, 100.0, 1.0);
+        return new RiskConfig(1.0, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.0005, 100.0, 1.0);
     }
 }

@@ -16,7 +16,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ..indicators import Indicators, compute_all, compute_atr_pct_series
-from ..strategy import Signal, SignalType, mean_reversion
+from ..strategy import Signal, SignalType, mean_reversion, with_target
 from .commission import CommissionModel
 from .execution import ExecutionModel
 from .models import (
@@ -203,6 +203,10 @@ def run_backtest(
             volumes[start : index + 1],
         )
         signal = strategy_fn(indicators, bar.close, cfg.atr_mult_sl, cfg.atr_mult_tp)
+        # Цель от порога комиссии ставится здесь, а не в модели: production применяет ту же
+        # функцию (`main.py`), поэтому прогон воспроизводит боевую геометрию выхода.
+        if cfg.min_tp_pct > 0 and not cfg.no_tp:
+            signal = with_target(signal, bar.close, indicators.atr, cfg.min_tp_pct)
         if not signal.is_actionable:
             index += 1
             continue

@@ -78,13 +78,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-notional-pct", type=float, default=100.0, help="лимит номинала позиции, %% депозита"
     )
     parser.add_argument("--atr-sl", type=float, default=1.5, help="множитель ATR для SL")
-    parser.add_argument("--atr-tp", type=float, default=2.0, help="множитель ATR для TP")
+    parser.add_argument(
+        "--atr-tp",
+        type=float,
+        default=None,
+        help=(
+            "множитель ATR для TP; не задан — цель строится от порога комиссии "
+            "(k×ATR, k = ceil(порог / ATR%))"
+        ),
+    )
     parser.add_argument(
         "--tp-sl",
         default="",
         help=(
             "перебор пар TP:SL через запятую, например 2:1.5,3:2,4:2.5; "
-            "пусто — один прогон по --atr-tp/--atr-sl"
+            "пусто — один прогон по --atr-tp/--atr-sl; заданные пары отключают цель от комиссии"
         ),
     )
     parser.add_argument(
@@ -292,7 +300,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             risk_per_trade_pct=args.risk_pct,
             max_position_notional_pct=args.max_notional_pct,
             atr_mult_sl=args.atr_sl,
-            atr_mult_tp=args.atr_tp,
             max_bars_in_trade=args.max_bars,
             cooldown_bars=args.cooldown_bars,
             trailing_atr=args.trailing_atr,
@@ -348,14 +355,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 2
             strategy_fn, strategy_label = _strategy_for(args, strategy_config, atr_threshold)
             for tariff in tariffs:
+                model = _commission_model(args, tariff)
                 for label, tp, sl in variants:
-                    run_config = replace(config, atr_mult_tp=tp, atr_mult_sl=sl)
+                    run_config = _run_config_for(config, tp, sl, model, dataset.instrument)
                     results.append(
                         run_backtest(
                             bars=bars,
                             instrument=dataset.instrument,
                             config=run_config,
-                            commission=_commission_model(args, tariff),
+                            commission=model,
                             interval_minutes=interval,
                             strategy_fn=strategy_fn,
                             label=_join_label(label, strategy_label),
@@ -490,13 +498,40 @@ def _parse_tariffs(value: str) -> List[str]:
     return tariffs
 
 
+def _run_config_for(
+    config: RunConfig,
+    tp: Optional[float],
+    sl: float,
+    model: CommissionModel,
+    instrument: Instrument,
+) -> RunConfig:
+    """Конфиг прогона: явное кратное TP или политика цели от порога комиссии."""
+    run_config = replace(config, atr_mult_sl=sl)
+    if tp is None:
+        return replace(run_config, min_tp_pct=_required_tp_pct(config, model, instrument))
+    return replace(run_config, atr_mult_tp=tp, min_tp_pct=0.0)
+
+
+def _required_tp_pct(config: RunConfig, model: CommissionModel, instrument: Instrument) -> float:
+    """Порог цели выхода, % от суммы сделки, по тарифу и классу инструмента."""
+    return (
+        config.commission_profit_ratio
+        * 2
+        * model.per_side_rate(instrument.is_future)
+        * 100.0
+    )
+
+
 def _parse_variants(
-    value: str, default_tp: float, default_sl: float
-) -> List[Tuple[str, float, float]]:
+    value: str, default_tp: Optional[float], default_sl: float
+) -> List[Tuple[str, Optional[float], float]]:
     """Развернуть `--tp-sl` в список вариантов (метка, TP, SL).
 
     Метка нужна только при переборе: одиночный прогон остаётся неотличим от
     `--atr-tp/--atr-sl`, поэтому прежние отчёты и тесты не меняются.
+
+    `default_tp = None` означает «цель строится от порога комиссии»: TP остаётся `None`,
+    чтобы вызывающий код не подставлял константу вместо политики.
     """
     if not value.strip():
         return [("", default_tp, default_sl)]

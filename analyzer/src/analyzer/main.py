@@ -13,7 +13,7 @@ from .indicators import compute_all
 from .metrics import start_metrics_server, signals_generated, signals_rejected, analysis_latency
 from .repository import AnalysisRepository, AnalysisRecord
 from .signal_publisher import SignalPublisher
-from .strategy import mean_reversion, SignalType
+from .strategy import mean_reversion, with_target, SignalType
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,11 @@ class AnalyzerPipeline:
                 vpin=candle_data.get("vpin"),
                 hawkes=candle_data.get("hawkes"),
             )
-            signal = mean_reversion(ind, price)
+            # Цель выхода — от порога комиссии: k×ATR покрывает ratio × 2 × ставку (шаг 1.9).
+            # Ставится до фильтра: иначе фильтр оценивал бы статическое 2×ATR.
+            signal = with_target(
+                mean_reversion(ind, price), price, ind.atr, self.config.required_tp_pct
+            )
 
             signal_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)

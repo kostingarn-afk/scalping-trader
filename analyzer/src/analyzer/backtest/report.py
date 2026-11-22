@@ -8,12 +8,12 @@ from __future__ import annotations
 import csv
 import io
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Sequence
 
 from .gate import format_gate_block
-from .models import BacktestResult, ExitReason, Trade
+from .models import BacktestResult, ExitReason, Trade, RunConfig
 
 # Сколько строк печатать в таблице лучших прогонов (перебор TP/SL и прочие варианты).
 TOP_RUNS = 10
@@ -157,10 +157,21 @@ def _parameters_line(results: Sequence[BacktestResult]) -> str:
         if first.fill_on_next_bar_open
         else "по закрытию бара сигнала"
     )
-    if any(result.config != first for result in results):
+    # Порог цели зависит от тарифа, поэтому одинаковые по смыслу прогоны различаются им;
+    # сравнивать конфиги нужно без него, иначе одиночный прогон выглядел бы перебором.
+    shapes = [_without_target_policy(result.config) for result in results]
+    thresholds = sorted(
+        {result.config.min_tp_pct for result in results if result.config.min_tp_pct > 0}
+    )
+    if any(shape != shapes[0] for shape in shapes):
         levels = "перебор TP:SL " + ", ".join(_tp_sl_variants(results))
     elif first.no_tp:
         levels = f"SL {first.atr_mult_sl:.2f}×ATR / TP выключен"
+    elif thresholds:
+        levels = (
+            f"SL {first.atr_mult_sl:.2f}×ATR / TP k×ATR от порога комиссии "
+            + ", ".join(f"{threshold:.2f} %" for threshold in thresholds)
+        )
     else:
         levels = f"SL {first.atr_mult_sl:.2f}×ATR / TP {first.atr_mult_tp:.2f}×ATR"
     line = (
@@ -205,6 +216,11 @@ def _tp_sl_variants(results: Sequence[BacktestResult]) -> List[str]:
         if level not in variants:
             variants.append(level)
     return variants
+
+
+def _without_target_policy(cfg: RunConfig) -> RunConfig:
+    """Конфиг без порога цели: он зависит от тарифа и не делает прогоны разными."""
+    return replace(cfg, min_tp_pct=0.0)
 
 
 EXIT_ORDER = (

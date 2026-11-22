@@ -73,7 +73,7 @@ def test_commission_filter_matches_production_away_from_threshold(atr: float):
         suggested_tp=price + 2.0 * atr,
     )
 
-    expected = CommissionFilter(ratio=3.0).should_keep(signal, quantity=1)
+    expected = CommissionFilter(ratio=3.0, rate_per_side=0.003).should_keep(signal, quantity=1)
     actual = passes_commission_filter(
         signal, price, instrument, CommissionModel("investor"), config
     )
@@ -92,7 +92,7 @@ def test_filter_deviation_from_production_is_confined_to_threshold_band():
     price = 270.0
     instrument = Instrument("SBER", "TQBR", lot_size=1)
     config = RunConfig(commission_profit_ratio=3.0)
-    production = CommissionFilter(ratio=3.0)
+    production = CommissionFilter(ratio=3.0, rate_per_side=0.003)
     investor = CommissionModel("investor")
 
     buy = Signal(SignalType.BUY, 0.8, price, price - 1.5 * 2.44, price + 2 * 2.44)
