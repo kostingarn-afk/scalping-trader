@@ -36,6 +36,7 @@ ruff = "^0.5"
 [tool.poetry.scripts]
 analyzer = "analyzer.main:main"
 analyzer-backtest = "analyzer.backtest.cli:main"
+analyzer-research = "analyzer.research.cli:main"
 
 [build-system]
 requires = ["poetry-core"]

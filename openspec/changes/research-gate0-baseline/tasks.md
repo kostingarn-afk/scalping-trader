@@ -35,7 +35,7 @@
 - [x] 3.2 уровни замечаний: `critical` останавливает исследование, `warning` попадает в отчёт
 - [x] 3.3 тесты `tests/test_research_integrity.py` на синтетике: дубли времени, цена вне сетки,
       пропуск внутри сессии, ночной разрыв, корпоративный разрыв
-- [ ] 3.4 прогон по `data/history-1min` (20 инструментов, 40 файлов): отчёт сохраняется,
+- [x] 3.4 прогон по `data/history-1min` (20 инструментов, 40 файлов): отчёт сохраняется,
       критичных нарушений нет либо они перечислены
 
 ## 4. Издержки, метка, дисперсии, VR
@@ -51,22 +51,23 @@
 
 - [x] 5.1 `research/registry.py`: структура записи, id, чтение `N_trials`; тесты
       `tests/test_research_registry.py`
-- [ ] 5.2 проверка, что артефакты этапа несут id записи; критерий «DSR без registry» даёт отказ
-      (отказ реализован и покрыт тестом; привязка id к артефактам — в блоке CLI/`report`, задача 6.x)
+- [x] 5.2 проверка, что артефакты этапа несут id записи; критерий «DSR без registry» даёт отказ
+      (конверт артефакта `build_artifact`, отказ на пустом реестре покрыт тестами)
 
 ## 6. CLI и обвязка
 
-- [ ] 6.1 `research/cli.py`: подкоманды `integrity` и `report`, `--data-dir`, `--out` (обязателен,
+- [x] 6.1 `research/cli.py`: подкоманды `integrity` и `report`, `--data-dir`, `--out` (обязателен,
       иначе отчёт не сохраняется)
-- [ ] 6.2 `pyproject.toml`: entry-point `analyzer-research`
-- [ ] 6.3 проверка обязательных полей артефактов (единицы, `n`, метод, флаги) — общий валидатор
-- [ ] 6.4 тесты `tests/test_research_cli.py`: разбор аргументов, обязательность `--out`,
+- [x] 6.2 `pyproject.toml`: entry-point `analyzer-research`
+- [x] 6.3 проверка обязательных полей артефактов (единицы, `n`, метод, флаги) — общий валидатор
+      `research/artifacts.py`
+- [x] 6.4 тесты `tests/test_research_cli.py`: разбор аргументов, обязательность `--out`,
       ненулевой код возврата при критичном Gate D
-- [ ] 6.5 `pytest tests -q` без регрессий, `ruff check src tests`
-- [ ] 6.6 прогон `analyzer-research integrity --data-dir ../data/history-1min --out ../reports/research`
+- [x] 6.5 `pytest tests -q` без регрессий, `ruff check src tests`
+- [x] 6.6 прогон `analyzer-research integrity --data-dir ../data/history-1min --out ../reports/research`
       и сохранение отчёта
 
 ## 7. Документация изменения
 
-- [ ] 7.1 `brief.md` актуализирован (шаги R0.1–R0.9, планируемые файлы, отклонения)
-- [ ] 7.2 `openspec validate --strict research-gate0-baseline` проходит
+- [x] 7.1 `brief.md` актуализирован (шаги R0.1–R0.9, планируемые файлы, отклонения)
+- [x] 7.2 `openspec validate --strict research-gate0-baseline` проходит

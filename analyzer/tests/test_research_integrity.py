@@ -31,6 +31,11 @@ def _series(count: int = 5, day: int = 18) -> list[Bar]:
     return [_bar(10, minute, 300.00 + 0.01 * minute, day=day) for minute in range(count)]
 
 
+def _outside_series(count: int = 3) -> list[Bar]:
+    """Бары в разрыве между утренней и основной сессиями (09:50–10:00)."""
+    return [_bar(9, 55 + minute, 300.00 + 0.01 * minute) for minute in range(count)]
+
+
 def test_clean_series_has_no_findings():
     report = check_integrity(_series(), TICK, instrument="AFLT", schedule=SessionSchedule())
 
@@ -77,7 +82,7 @@ def test_gap_inside_session_is_reported():
 
 
 def test_bars_outside_session_reported():
-    bars = _series(3, day=21)  # 21 ноября 2026 — суббота
+    bars = _outside_series(3)
 
     report = check_integrity(bars, TICK, schedule=SessionSchedule())
 
@@ -167,7 +172,9 @@ def test_empty_series_rejected():
 
 
 def test_markdown_contains_stats_and_findings():
-    report = check_integrity(_series(2, day=21), TICK, instrument="AFLT", schedule=SessionSchedule())
+    report = check_integrity(
+        _outside_series(2), TICK, instrument="AFLT", schedule=SessionSchedule()
+    )
 
     markdown = report.format_markdown()
 

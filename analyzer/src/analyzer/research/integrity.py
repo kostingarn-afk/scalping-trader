@@ -287,16 +287,19 @@ def _check_auction_prints(
     findings: List[Finding],
     stats: Dict[str, float],
 ) -> None:
-    """Нулевой объём в первую/последнюю минуту сессии — признак аукционного принта.
+    """Нулевой объём в первую/последнюю минуту окна — признак аукционного принта.
 
     Такие бары не содержат непрерывной торговли: их доходности и объёмы нельзя смешивать с
     обычными, иначе спред и `Cost` занижаются.
     """
-    last_minute = schedule.session_minutes() - 1
     auctions = 0
     for bar in bars:
-        minute = schedule.session_minute(bar.ts)
-        if minute in (0, last_minute) and bar.volume == 0:
+        bounds = schedule.window_bounds(bar.ts)
+        if bounds is None:
+            continue
+        start, end = bounds
+        minute = schedule.minute_of_day(bar.ts)
+        if minute in (start, end - 1) and bar.volume == 0:
             auctions += 1
     stats["auction_prints"] = float(auctions)
     if auctions:

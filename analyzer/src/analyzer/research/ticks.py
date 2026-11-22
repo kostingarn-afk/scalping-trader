@@ -58,11 +58,16 @@ class TickSize:
         return float(ticks) * self.value
 
     def is_on_grid(self, price: float, tolerance: Optional[float] = None) -> bool:
-        """Лежит ли цена на сетке шага (допуск — на шум представления float)."""
+        """Лежит ли цена на сетке шага (допуск — на шум представления float).
+
+        Считается в `float`: `Decimal` на каждом баре выгрузки (сотни тысяч строк) превращает
+        Gate D в минуты счёта, а погрешность деления здесь на много порядков меньше допуска.
+        """
+        if self.value <= 0:
+            raise TickSizeError("tick size must be positive")
         tol = max(self.value * 1e-6, 1e-9) if tolerance is None else tolerance
-        ratio = Decimal(str(price)) / Decimal(str(self.value))
-        offset = abs(ratio - ratio.to_integral_value(ROUND_HALF_UP)) * Decimal(str(self.value))
-        return float(offset) <= tol
+        quotient = price / self.value
+        return abs(quotient - round(quotient)) * self.value <= tol
 
     def as_parameter(self) -> Parameter:
         return Parameter(

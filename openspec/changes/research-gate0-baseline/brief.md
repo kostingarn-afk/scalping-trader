@@ -64,20 +64,31 @@
 
 ## Способ проверки
 
-- `pytest tests/test_research_units.py tests/test_research_ticks.py tests/test_research_sessions.py
-  tests/test_research_integrity.py tests/test_research_variance.py tests/test_research_costs.py
-  tests/test_research_labels.py tests/test_research_registry.py` — единицы, резолвинг тика,
-  сессии, Gate D, дисперсии, издержки, метка, реестр на синтетике.
-- `pytest tests` — без регрессий; `ruff check src tests`.
-- Реальный прогон: `analyzer-research integrity --data-dir ../data/history-1min --out ../reports/research`
-  — 20 инструментов (40 файлов: CSV + `.meta.json`); отчёт печатает доли пропусков, нулевых
-  объёмов, источник шага цены и флаги.
+- `pytest tests -q` — 480 тестов, включая `tests/test_research_*.py`: единицы, шаг цены, сессии
+  (включая выходные и DST), Gate D, издержки, метка, дисперсии, реестр, конверт артефактов, CLI.
+- `ruff check src tests` — чисто.
+- Реальный прогон на 20 инструментах (40 файлов):
+  `analyzer-research integrity --data-dir ../data/history-1min --out ../reports/research`
+  → 0 критичных провалов; `report` → артефакт `research_report` с id опыта.
+- `openspec validate --strict research-gate0-baseline`.
+
+## Наблюдения реального прогона (2026-11-22)
+
+| Наблюдение | Значение | Следствие |
+|---|---|---|
+| Шаг цены | по всем 20 инструментам выведен по сетке цен (`UNVERIFIED`) | нужна перевыгрузка с `min_price_increment` (задача 1.6) |
+| Торговые окна | будни: утренняя/основная/вечерняя; **выходные торгуются** (02:00–23:50 MSK) | расписание расширено до двух наборов окон; торговля в выходные — вопрос политики R1 |
+| Бары вне сессий | ~2 % (5.9k из 281k по AFLT) | норма: разрывы окон и первые минуты выгрузки |
+| Пропущенные бары внутри окон | 15 % (AFLT) | низкая ликвидность части минут — вход для `τ_liq` |
+| Издержки | 5.36 тика за круг (AFLT, тариф «Трейдер», спред 5 б.п.) | спред помечен `UNVERIFIED` |
+| `VR(τ)` | 1.00 / 0.74 / 0.63 / 0.58 при τ = 1/3/10/30 | mean reversion видна на минутном ряду |
 
 ## Файлы
 
-Реализован блок 1: `units.py`, `ticks.py`, `tests/test_research_units.py`,
-`tests/test_research_ticks.py`, поле `min_price_increment` в `HistoryCsvWriter` и чтение его в
-`backtest/loader.py`. Остальные строки таблицы — планируемые.
+Реализовано (этап R0, кроме заблокированных задач 1.6 и 2.3): `units.py`, `ticks.py`,
+`sessions.py`, `integrity.py`, `costs.py`, `labels.py`, `variance.py`, `registry.py`,
+`artifacts.py`, `cli.py`, тесты `tests/test_research_*.py`, entry-point `analyzer-research`,
+поле `min_price_increment` в `HistoryCsvWriter` и чтение его в `backtest/loader.py`.
 
 | Файл | Что будет сделано |
 |---|---|---|
@@ -98,6 +109,7 @@
 ## Статус актуальности
 
 Сверено с артефактами change на 2026-11-22 (ревизия плана 3, после трёх проходов ревью).
-Реализован блок 1 задач; правки кода сопровождаются правкой этого файла.
-Открытая блокировка: перевыгрузка с `min_price_increment` (задача 1.6) требует `T_INVEST_TOKEN`
-и сборки Collector — не выполнена.
+Этап R0 реализован; правки кода сопровождаются правкой этого файла.
+Открытые блокировки: перевыгрузка с `min_price_increment` (задача 1.6) и сверка часов с
+`TradingSchedules` (задача 2.3) требуют `T_INVEST_TOKEN` и сборки Collector.
+Открытый вопрос для этапа R1: торговать ли в окно выходного дня.
