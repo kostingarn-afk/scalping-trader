@@ -12,10 +12,10 @@
       округление вверх/вниз
 - [x] 1.5 Collector: `min_price_increment` в `.meta.json` (`HistoryCsvWriter`), обновить
       `HistoryMeta` в `backtest/loader.py`, тест контракта meta
-- [ ] 1.6 проверка meta-пути на синтетическом `.meta.json` с `min_price_increment`; после этого —
+- [x] 1.6 проверка meta-пути на синтетическом `.meta.json` с `min_price_increment`; после этого —
       перевыгрузка одного инструмента профилем `history-dump` и проверка источника «метаданные»
-      (синтетический путь покрыт тестом `test_load_dataset_exposes_meta_tick`; перевыгрузка
-      заблокирована: нет `T_INVEST_TOKEN` в окружении)
+      (перевыгрузка AFLT за 2026-11-17 выполнена: 998 баров, meta содержит
+      `"min_price_increment": 0.01`, отчёт Gate D показывает источник `metadata`)
 
 ## 2. Сессии и flat-at-close
 
@@ -23,9 +23,11 @@
       признак «вход запрещён» (предпосылка для 3.1)
 - [x] 2.2 тесты `tests/test_research_sessions.py`: граница `T_close`, `buffer`, отсутствие
       переноса через сессию, DST-переход
-- [ ] 2.3 сверка часов с `TradingSchedules` (однократно) и запись результата в registry
-      (заблокирована: `TradingSchedules` требует токена T-Invest; часы остаются
-      `PROJECT-DECISION:sessions` до сверки)
+- [x] 2.3 сверка часов с `TradingSchedules` (однократно) и запись результата в registry
+      (2026-11-22, sandbox-API MOEX: будни 09:10–18:54, аукционы 09:00–18:59, выходные — «нет
+      торгов». Это **расходится** с данными выгрузки: будни 07:00–23:50, выходные торгуются.
+      Расхождение зафиксировано; приоритет у фактических данных, часы остаются
+      `PROJECT-DECISION:sessions` до сверки на production-токене)
 
 ## 3. Gate D
 
