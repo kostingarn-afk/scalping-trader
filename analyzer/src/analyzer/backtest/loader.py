@@ -5,7 +5,8 @@
 - `{ticker}_{interval}min.csv` — заголовок `ts,open,high,low,close,volume`, `ts` в ISO-8601 UTC
   (время закрытия свечи), строки по возрастанию времени;
 - `{ticker}_{interval}min.meta.json` — поля `ticker`, `class_code`, `lot_size`,
-  `interval_minutes` (обязательные) и `fetched_at`, `source` (информационные).
+  `interval_minutes` (обязательные), `fetched_at`, `source` (информационные) и
+  `min_price_increment` (шаг цены; с шага 0.2 пишется всегда, в старых выгрузках отсутствует).
 
 Выгрузка 1-минутной истории за месяцы одним запросом `GetCandles` невозможна из-за лимита
 периода, поэтому Collector собирает файл постранично и отдаёт уже склеенный ряд.
@@ -34,6 +35,9 @@ class HistoryMeta:
     interval_minutes: int
     fetched_at: Optional[str] = None
     source: Optional[str] = None
+    # Шаг цены (шаг 0.2 `to_do.md`). В выгрузках до появления поля отсутствует: тогда шаг
+    # определяет исследовательский контур, помечая выведенное значение как UNVERIFIED.
+    min_price_increment: Optional[float] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "HistoryMeta":
@@ -44,6 +48,12 @@ class HistoryMeta:
         ]
         if missing:
             raise ValueError(f"meta.json misses required fields: {', '.join(missing)}")
+        raw_increment = data.get("min_price_increment")
+        increment: Optional[float] = None
+        if raw_increment not in (None, ""):
+            increment = float(raw_increment)
+            if increment <= 0:
+                raise ValueError(f"meta.json: min_price_increment must be positive, got {increment}")
         return cls(
             ticker=str(data["ticker"]),
             class_code=str(data["class_code"]),
@@ -51,6 +61,7 @@ class HistoryMeta:
             interval_minutes=int(data["interval_minutes"]),
             fetched_at=data.get("fetched_at"),
             source=data.get("source"),
+            min_price_increment=increment,
         )
 
 
@@ -60,6 +71,7 @@ class HistoryDataset:
     interval_minutes: int
     bars: Tuple[Bar, ...]
     source: Path
+    meta: Optional[HistoryMeta] = None
 
     def __len__(self) -> int:
         return len(self.bars)
@@ -111,6 +123,7 @@ def load_dataset(
         interval_minutes=interval_minutes,
         bars=bars,
         source=csv_path,
+        meta=meta,
     )
 
 

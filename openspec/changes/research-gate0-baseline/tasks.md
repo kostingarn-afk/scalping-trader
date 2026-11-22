@@ -2,18 +2,20 @@
 
 ## 1. Единицы и шаг цены
 
-- [ ] 1.1 `research/units.py`: `Parameter(name, value, units)`, словарь допустимых единиц,
+- [x] 1.1 `research/units.py`: `Parameter(name, value, units)`, словарь допустимых единиц,
       отказ при отсутствии `units` и при несовпадении ожидаемой единицы
-- [ ] 1.2 тесты `tests/test_research_units.py`: параметр без единиц, неверные единицы, сборка
+- [x] 1.2 тесты `tests/test_research_units.py`: параметр без единиц, неверные единицы, сборка
       `units_registry`
-- [ ] 1.3 `research/ticks.py`: резолвер шага цены (метаданные → справочник → НОД сетки),
+- [x] 1.3 `research/ticks.py`: резолвер шага цены (метаданные → справочник → НОД сетки),
       флаг `UNVERIFIED`, перевод цены/дельты в тики
-- [ ] 1.4 тесты `tests/test_research_ticks.py`: шаг из метаданных, fallback, цена не кратна шагу,
+- [x] 1.4 тесты `tests/test_research_ticks.py`: шаг из метаданных, fallback, цена не кратна шагу,
       округление вверх/вниз
-- [ ] 1.5 Collector: `min_price_increment` в `.meta.json` (`HistoryCsvWriter`), обновить
+- [x] 1.5 Collector: `min_price_increment` в `.meta.json` (`HistoryCsvWriter`), обновить
       `HistoryMeta` в `backtest/loader.py`, тест контракта meta
 - [ ] 1.6 проверка meta-пути на синтетическом `.meta.json` с `min_price_increment`; после этого —
       перевыгрузка одного инструмента профилем `history-dump` и проверка источника «метаданные»
+      (синтетический путь покрыт тестом `test_load_dataset_exposes_meta_tick`; перевыгрузка
+      заблокирована: нет `T_INVEST_TOKEN` в окружении)
 
 ## 2. Сессии и flat-at-close
 

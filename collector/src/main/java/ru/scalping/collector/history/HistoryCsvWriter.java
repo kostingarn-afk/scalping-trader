@@ -61,6 +61,10 @@ public class HistoryCsvWriter {
         meta.put("ticker", instrument.ticker());
         meta.put("class_code", instrument.classCode());
         meta.put("lot_size", instrument.lot());
+        // Шаг цены нужен офлайн-исследованию: барьеры, издержки и требуемое движение
+        // считаются в тиках (docs/buy_frame.md §2). Без поля шаг выводится по сетке цен
+        // и помечается UNVERIFIED.
+        meta.put("min_price_increment", instrument.minPriceIncrement());
         meta.put("interval_minutes", interval.minutes());
         meta.put("bars", candles.size());
         meta.put("fetched_at", Instant.now().truncatedTo(ChronoUnit.SECONDS).toString());
