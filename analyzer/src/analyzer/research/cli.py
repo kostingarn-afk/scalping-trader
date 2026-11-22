@@ -275,11 +275,41 @@ def _run_phi_star(
         flags=flags,
     )
     markdown = format_gate_markdown(tables)
+
+    if args.stress is not None:
+        stressed = [
+            _phi_star_entry(dataset, args, schedule, policy, taus, stress=args.stress)
+            for dataset in datasets
+        ]
+        artifact["payload"]["stress"] = {  # type: ignore[index]
+            "multiplier": args.stress,
+            "verdict_note": "вердикт Gate 0a считается по базовым издержкам",
+            "instruments": [table.to_dict() for table in stressed],
+        }
+        markdown += "\n\n" + _format_stress(tables, stressed, args.stress)
+
     _write(args.out / "phi-star.md", markdown)
     _write(args.out / "phi-star.json", json.dumps(artifact, ensure_ascii=False, indent=2))
     verdict = artifact["payload"]["verdict"]  # type: ignore[index]
     print(f"отчёт сохранён: {args.out / 'phi-star.md'}; вердикт: {verdict}; опыт: {trial.id}")
     return EXIT_OK if verdict == "PASS" else EXIT_GATE
+
+
+def _format_stress(
+    tables: Sequence[PhiStarTable], stressed: Sequence[PhiStarTable], multiplier: float
+) -> str:
+    lines = [f"## Стресс издержек ×{multiplier:g}", ""]
+    lines.append("Вердикт Gate 0a считается по базовым издержкам; стресс — диагностика Gate 4.")
+    lines.append("")
+    lines.append("| Инструмент | φ* базовый | φ* стресс | Базовый вердикт | Стресс-вердикт |")
+    lines.append("|---|---|---|---|---|")
+    for base, hard in zip(tables, stressed):
+        base_phi = "—" if base.min_phi is None else f"{base.min_phi:.3f}"
+        hard_phi = "—" if hard.min_phi is None else f"{hard.min_phi:.3f}"
+        lines.append(
+            f"| {base.instrument} | {base_phi} | {hard_phi} | {base.verdict} | {hard.verdict} |"
+        )
+    return "\n".join(lines)
 
 
 def _phi_star_entry(
@@ -288,6 +318,7 @@ def _phi_star_entry(
     schedule: SessionSchedule,
     policy,
     taus: Sequence[int],
+    stress: float = 1.0,
 ) -> PhiStarTable:
     name = dataset.instrument.name
     tick = _resolve_tick(dataset)
@@ -298,7 +329,7 @@ def _phi_star_entry(
         tariff=args.tariff,
         spread_bps=args.spread_bps,
         spread_verified=args.spread_verified,
-        stress=args.stress or 1.0,
+        stress=stress,
     )
     variance = estimate_variances(dataset.bars)
     sigma_1_log = variance.parkinson**0.5

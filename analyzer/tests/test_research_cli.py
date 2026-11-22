@@ -132,3 +132,34 @@ def test_report_rejects_invalid_taus(data_dir: Path, tmp_path: Path):
     )
 
     assert code == 2
+
+
+def test_phi_star_stress_is_diagnostic(data_dir: Path, tmp_path: Path):
+    """Стресс печатается рядом и не меняет вердикт Gate 0a."""
+    out = tmp_path / "out"
+
+    code = main(
+        [
+            "phi-star",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--stress",
+            "1.5",
+            "--taus",
+            "1,3",
+        ]
+    )
+
+    assert code in (0, 1)
+    payload = json.loads((out / "phi-star.json").read_text(encoding="utf-8"))
+    assert payload["payload"]["verdict"] in ("PASS", "IMPOSSIBLE")
+    assert payload["payload"]["stress"]["multiplier"] == pytest.approx(1.5)
+    base_phi = payload["payload"]["instruments"][0]["min_phi"]
+    stress_phi = payload["payload"]["stress"]["instruments"][0]["min_phi"]
+    if base_phi is not None:
+        assert stress_phi == pytest.approx(base_phi * 1.5)
+    assert "Стресс издержек" in (out / "phi-star.md").read_text(encoding="utf-8")
