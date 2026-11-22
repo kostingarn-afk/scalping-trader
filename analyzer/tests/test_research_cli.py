@@ -163,3 +163,73 @@ def test_phi_star_stress_is_diagnostic(data_dir: Path, tmp_path: Path):
     if base_phi is not None:
         assert stress_phi == pytest.approx(base_phi * 1.5)
     assert "Стресс издержек" in (out / "phi-star.md").read_text(encoding="utf-8")
+
+
+def test_theta_rejects_deltas_with_escalate(data_dir: Path, tmp_path: Path):
+    code = main(
+        [
+            "theta",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(tmp_path / "out"),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--deltas",
+            "1,5",
+            "--escalate",
+        ]
+    )
+
+    assert code == 2
+
+
+def test_theta_rejects_short_null_reps(data_dir: Path, tmp_path: Path):
+    code = main(
+        [
+            "theta",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(tmp_path / "out"),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--null-reps",
+            "10",
+        ]
+    )
+
+    assert code == 2
+
+
+def test_theta_writes_artifacts_even_when_gate_fails(data_dir: Path, tmp_path: Path):
+    """40 баров — мало для регрессии: Gate 1 не пройден, но артефакт обязан быть записан."""
+    out = tmp_path / "out"
+
+    code = main(
+        [
+            "theta",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--bootstrap",
+            "20",
+            "--null-reps",
+            "50",
+        ]
+    )
+
+    assert code == 1
+    payload = json.loads((out / "theta.json").read_text(encoding="utf-8"))
+    assert payload["name"] == "theta_invariance_regression"
+    assert payload["payload"]["gate1"] == "THETA_UNDEFINED"
+    entry = payload["payload"]["instruments"][0]
+    assert entry["gate1"] == "THETA_UNDEFINED"
+    assert entry["gate1_reasons"]
+    assert entry["ou_fit"] is None
+    assert "Gate 1" in (out / "theta.md").read_text(encoding="utf-8")
+    records = (tmp_path / "registry.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(records[-1])["params"]["model"] == "gate1"

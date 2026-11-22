@@ -27,7 +27,16 @@ from .policy import load_policy
 from .registry import RegistryError, TrialRegistry
 from .sessions import SessionSchedule
 from .ticks import TickSize, TickSizeError, describe, resolve_tick_size
-from .units import COUNT, RATIO, TICKS
+from .theta import (
+    DEFAULT_BOOTSTRAP,
+    DEFAULT_DELTAS,
+    DEFAULT_NULL_REPS,
+    ESCALATED_DELTAS,
+    ThetaError,
+    estimate_theta,
+    fit_ou,
+)
+from .units import COUNT, MINUTE_INVERSE, MINUTES, RATIO, TICKS
 from .variance import (
     DeseasonResult,
     VarianceError,
@@ -59,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("integrity", "Gate D: целостность выгрузок"),
         ("report", "сводка: шаг цены, издержки, дисперсии, VR"),
         ("phi-star", "Gate 0a: φ*(τ) = Cost / σ_τ"),
+        ("theta", "Gate 1: θ по инвариантности и OU-параметры"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("--data-dir", required=True, type=Path, help="каталог выгрузок")
@@ -105,6 +115,35 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--taus", default=",".join(str(tau) for tau in GATE_TAUS), help="сетка τ"
             )
+        if name == "theta":
+            command.add_argument(
+                "--deltas",
+                default=None,
+                help=(
+                    "сетка Δ в минутах; по умолчанию "
+                    f"{','.join(str(delta) for delta in DEFAULT_DELTAS)}"
+                ),
+            )
+            command.add_argument(
+                "--escalate",
+                action="store_true",
+                help=(
+                    "расширить сетку Δ до 60 мин (повод: θ ≤ 0.02 не идентифицируется "
+                    "на сетке по умолчанию)"
+                ),
+            )
+            command.add_argument(
+                "--bootstrap",
+                type=int,
+                default=DEFAULT_BOOTSTRAP,
+                help="число ресамплов CI по сессиям",
+            )
+            command.add_argument(
+                "--null-reps",
+                type=int,
+                default=DEFAULT_NULL_REPS,
+                help="число прогонов нулевой полосы (случайное блуждание)",
+            )
     return parser
 
 
@@ -128,6 +167,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_integrity(args, datasets, schedule)
     if args.command == "phi-star":
         return _run_phi_star(args, datasets, schedule)
+    if args.command == "theta":
+        return _run_theta(args, datasets, schedule)
     return _run_report(args, datasets, schedule)
 
 
@@ -221,7 +262,7 @@ def _run_integrity(
 def _run_phi_star(
     args: argparse.Namespace, datasets: Sequence[HistoryDataset], schedule: SessionSchedule
 ) -> int:
-    taus = _parse_taus(args.taus)
+    taus = _parse_grid(args.taus)
     if taus is None:
         print(f"ошибка ввода: неверная сетка τ {args.taus!r}", file=sys.stderr)
         return EXIT_INPUT
@@ -353,10 +394,236 @@ def _phi_star_entry(
     )
 
 
+def _run_theta(
+    args: argparse.Namespace, datasets: Sequence[HistoryDataset], schedule: SessionSchedule
+) -> int:
+    if args.deltas and args.escalate:
+        print("ошибка ввода: --deltas и --escalate взаимоисключающие", file=sys.stderr)
+        return EXIT_INPUT
+    if args.deltas:
+        deltas = _parse_grid(args.deltas)
+        if deltas is None:
+            print(f"ошибка ввода: неверная сетка Δ {args.deltas!r}", file=sys.stderr)
+            return EXIT_INPUT
+    else:
+        deltas = ESCALATED_DELTAS if args.escalate else DEFAULT_DELTAS
+    if args.bootstrap < 20:
+        print("ошибка ввода: --bootstrap должен быть не меньше 20", file=sys.stderr)
+        return EXIT_INPUT
+    if args.null_reps < 50:
+        print("ошибка ввода: --null-reps должен быть не меньше 50", file=sys.stderr)
+        return EXIT_INPUT
+
+    registry_path = args.registry or (args.out / "registry.jsonl")
+    registry = TrialRegistry(registry_path)
+    policy, _sources = load_policy(None)
+    tau_cap = policy.tau_cap_minutes
+    try:
+        trial = registry.register(
+            {
+                "model": "gate1",
+                "frame": f"{datasets[0].interval_minutes}min",
+                "window": _window(datasets),
+                "deltas": list(deltas),
+                "bootstrap": args.bootstrap,
+                "null_reps": args.null_reps,
+                "schedule": schedule.name,
+                "tau_cap_minutes": tau_cap,
+            }
+        )
+    except RegistryError as exc:
+        print(f"ошибка реестра: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+
+    entries: List[Dict[str, object]] = []
+    flags: Dict[str, str] = {}
+    for dataset in datasets:
+        try:
+            fit = estimate_theta(
+                dataset.bars,
+                schedule,
+                deltas=deltas,
+                bootstrap=args.bootstrap,
+                null_reps=args.null_reps,
+            )
+        except ThetaError as exc:
+            print(f"{dataset.instrument.name}: {exc}", file=sys.stderr)
+            return EXIT_INPUT
+
+        entry: Dict[str, object] = {
+            "instrument": dataset.instrument.name,
+            "bars": len(dataset.bars),
+            "sessions": None if fit.band is None else fit.band.sessions,
+            "gate1": fit.verdict,
+            **fit.to_dict(),
+        }
+        half_life = entry.get("t_half_minutes")
+        exceeds_cap = isinstance(half_life, (int, float)) and float(half_life) > tau_cap
+        entry["t_half_exceeds_cap"] = exceeds_cap
+        if exceeds_cap:
+            flags[f"horizon:{dataset.instrument.name}"] = (
+                f"SCOPE: t1/2={float(half_life):.1f} мин > tau_cap={tau_cap}"
+            )
+        if fit.gate1_passed:
+            try:
+                entry["ou_fit"] = fit_ou(
+                    dataset.instrument.name, dataset.bars, schedule, fit
+                ).to_dict()
+            except ThetaError as exc:
+                entry["gate1"] = "THETA_UNDEFINED"
+                entry["ou_fit"] = None
+                entry["gate1_reasons"] = [*fit.reasons, f"OU-параметры не построены: {exc}"]
+        else:
+            entry["ou_fit"] = None
+        entries.append(entry)
+
+        for key, value in fit.flags.items():
+            flags[f"{key}:{dataset.instrument.name}"] = value
+        if fit.band is None:
+            flags[f"band:{dataset.instrument.name}"] = "NO_BAND"
+        if args.escalate:
+            flags[f"deltas:{dataset.instrument.name}"] = "ESCALATED:60"
+
+    passed = [entry for entry in entries if entry["gate1"] == "PASS"]
+    verdict = "PASS" if passed else "THETA_UNDEFINED"
+    payload = build_artifact(
+        name="theta_invariance_regression",
+        units={
+            "theta": MINUTE_INVERSE,
+            "horizon": MINUTES,
+            "sigma": RATIO,
+            "variance": RATIO,
+            "count": COUNT,
+        },
+        n={str(entry["instrument"]): int(entry["bars"]) for entry in entries},  # type: ignore[arg-type]
+        method=(
+            "ACF лог-цены внутри торгового окна (пары только при точном шаге Δ), регрессия "
+            "θ̂ на 1/Δ, CI блочным bootstrap по сессиям; дисперсионная оценка "
+            "Var(x_{t+Δ}−x_t) = (σ²/θ)(1−e^{−θΔ}) + 2ω²; Gate 1 по нулевой полосе "
+            "случайного блуждания с той же геометрией окон"
+        ),
+        flags=flags,
+        payload={
+            "trial_id": trial.id,
+            "gate1": verdict,
+            "deltas": list(deltas),
+            "escalated": bool(args.escalate),
+            "tau_cap_minutes": tau_cap,
+            "instruments": entries,
+        },
+    )
+
+    _write(args.out / "theta.md", _format_theta(entries, trial.id, verdict))
+    _write(args.out / "theta.json", json.dumps(payload, ensure_ascii=False, indent=2))
+    print(
+        f"отчёт сохранён: {args.out / 'theta.md'}; вердикт Gate 1: {verdict} "
+        f"({len(passed)}/{len(entries)}); опыт: {trial.id}"
+    )
+    return EXIT_OK if verdict == "PASS" else EXIT_GATE
+
+
+def _format_theta(
+    entries: Sequence[Dict[str, object]], trial_id: str, verdict: str
+) -> str:
+    passed = sum(1 for entry in entries if entry["gate1"] == "PASS")
+    lines = ["# Gate 1 — идентификация θ", ""]
+    lines.append(
+        f"Опыт `{trial_id}`; инструментов: {len(entries)}; Gate 1 пройден: {passed}; "
+        f"вердикт: **{verdict}**."
+    )
+    lines.append("")
+    lines.append(
+        "θ ACF — оценка по спеке (`buy_frame.md` §6.3), θ дисп. — по дисперсии приращений. "
+        "Gate 1 требует, чтобы обе были выше полосы случайного блуждания; расхождение "
+        "оценок и t½ больше τ_cap печатаются как флаги."
+    )
+    lines.append("")
+    lines.append(
+        "| Инструмент | θ ACF | CI θ ACF | θ дисп. | Полоса ACF | Полоса дисп. "
+        "| t½, мин | Gate 1 |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for entry in entries:
+        band = entry.get("null_band") or {}
+        acf_band = band.get("acf_intercept") if isinstance(band, dict) else None
+        var_band = band.get("variance") if isinstance(band, dict) else None
+        ci = entry.get("theta_ci") or [None, None]
+        lines.append(
+            "| {name} | {acf} | {ci} | {var} | {acf_band} | {var_band} | {half} | {gate} |".format(
+                name=entry["instrument"],
+                acf=_fmt(entry.get("theta")),
+                ci=f"{_fmt(ci[0])}…{_fmt(ci[1])}",
+                var=_fmt(_nested(entry, "variance_estimate", "theta")),
+                acf_band=_fmt(None if not acf_band else acf_band[1]),
+                var_band=_fmt(None if not var_band else var_band[1]),
+                half=_fmt(entry.get("t_half_minutes")),
+                gate=entry["gate1"],
+            )
+        )
+    lines.append("")
+    reasons = [
+        (str(entry["instrument"]), reason)
+        for entry in entries
+        for reason in (entry.get("gate1_reasons") or [])
+    ]
+    if reasons:
+        lines.append("## Причины провала")
+        lines.append("")
+        for instrument, reason in reasons:
+            lines.append(f"- **{instrument}**: {reason}")
+        lines.append("")
+
+    lines.append("## Signature plot")
+    lines.append("")
+    lines.append("| Инструмент | Δ, мин | ρ̂ | θ̂ | пар |")
+    lines.append("|---|---|---|---|---|")
+    for entry in entries:
+        for point in entry.get("points") or []:
+            lines.append(
+                f"| {entry['instrument']} | {point['delta']} | {point['rho']:.4f} "
+                f"| {point['theta']:.4f} | {point['pairs']} |"
+            )
+    lines.append("")
+
+    lines.append("## OU-параметры")
+    lines.append("")
+    lines.append("| Инструмент | θ used | σ | σ_P | μ | attenuation | ρ_model(10) |")
+    lines.append("|---|---|---|---|---|---|---|")
+    fitted = [entry for entry in entries if entry.get("ou_fit")]
+    for entry in fitted:
+        ou = entry["ou_fit"]
+        rho_ten = (ou.get("rho_model") or {}).get("10")
+        lines.append(
+            f"| {entry['instrument']} | {_fmt(ou.get('theta_used'))} | {_fmt(ou.get('sigma'))} "
+            f"| {_fmt(ou.get('sigma_p'))} | {_fmt(ou.get('mu'))} "
+            f"| {_fmt(ou.get('attenuation'))} | {_fmt(rho_ten)} |"
+        )
+    if not fitted:
+        lines.append("| — | — | — | — | — | — | — |")
+    return "\n".join(lines)
+
+
+def _nested(entry: Dict[str, object], outer: str, inner: str) -> Optional[object]:
+    block = entry.get(outer)
+    if not isinstance(block, dict):
+        return None
+    return block.get(inner)
+
+
+def _fmt(value: object) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "да" if value else "нет"
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}"
+    return str(value)
+
+
 def _run_report(
     args: argparse.Namespace, datasets: Sequence[HistoryDataset], schedule: SessionSchedule
 ) -> int:
-    taus = _parse_taus(args.taus)
+    taus = _parse_grid(args.taus)
     if taus is None:
         print(f"ошибка ввода: неверная сетка τ {args.taus!r}", file=sys.stderr)
         return EXIT_INPUT
@@ -557,7 +824,7 @@ def _resolve_tick(dataset: HistoryDataset) -> TickSize:
     return resolve_tick_size(meta_value=meta_value, prices=prices)
 
 
-def _parse_taus(raw: str) -> Optional[Tuple[int, ...]]:
+def _parse_grid(raw: str) -> Optional[Tuple[int, ...]]:
     try:
         taus = tuple(int(part) for part in raw.split(",") if part.strip())
     except ValueError:
