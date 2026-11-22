@@ -123,7 +123,7 @@ class RiskManagerTest {
         return new RiskConfig(d.maxLossPerTradePct(), d.pnlCircuitBreakerPct(),
                 d.commissionProfitRatio(), d.maxOpenPositions(), d.maxHoldingTimeMinutes(),
                 d.correlationThreshold(), d.maxTradesPerMinute(), d.entryAfterMskMinutes(),
-                d.commissionRatePerSide(), notionalPct);
+                d.commissionRatePerSide(), notionalPct, d.kellyCapPct());
     }
 
     private static RiskConfig withCommissionRate(double ratePerSide) {
@@ -131,6 +131,6 @@ class RiskManagerTest {
         return new RiskConfig(d.maxLossPerTradePct(), d.pnlCircuitBreakerPct(),
                 d.commissionProfitRatio(), d.maxOpenPositions(), d.maxHoldingTimeMinutes(),
                 d.correlationThreshold(), d.maxTradesPerMinute(), d.entryAfterMskMinutes(),
-                ratePerSide, d.maxPositionNotionalPct());
+                ratePerSide, d.maxPositionNotionalPct(), d.kellyCapPct());
     }
 }

@@ -29,7 +29,8 @@ class TradingWindowTest {
                 DEFAULT.maxTradesPerMinute(),
                 minutes,
                 DEFAULT.commissionRatePerSide(),
-                DEFAULT.maxPositionNotionalPct()
+                DEFAULT.maxPositionNotionalPct(),
+                DEFAULT.kellyCapPct()
         );
     }
 

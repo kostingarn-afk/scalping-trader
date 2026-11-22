@@ -35,6 +35,8 @@ public class RiskManager {
     private final Deque<Instant> recentOrders = new ArrayDeque<>();
     private final Map<String, String> openPositions = new ConcurrentHashMap<>(); // figi → tradeId
     private volatile boolean pnlCircuitBreakerActive = false;
+    /** Оценка Келли (доля капитала) по закрытым сделкам; {@code null} — оценки нет. */
+    private volatile Double kellyFraction;
 
     public RiskManager(Clock clock) {
         this.clock = clock;
@@ -72,6 +74,31 @@ public class RiskManager {
 
     public boolean isPnlCircuitBreakerActive() {
         return pnlCircuitBreakerActive;
+    }
+
+    /** Обновить оценку Келли; {@code null} — статистики нет, поведение прежнее. */
+    public void updateKellyFraction(Double fraction) {
+        this.kellyFraction = fraction;
+        log.info("Kelly fraction updated: {}", fraction);
+    }
+
+    public Double kellyFraction() {
+        return kellyFraction;
+    }
+
+    /**
+     * Риск на сделку в % депозита: {@code min(max_loss, kelly_cap_pct, Келли·100)}.
+     *
+     * <p>Без оценки Келли действует только {@code max_loss_per_trade_pct}: ноль остановил бы
+     * торговлю до накопления статистики, а потолок без оценки ограничивать нечего.
+     */
+    double effectiveRiskPct(RiskConfig cfg) {
+        double maxLoss = cfg.maxLossPerTradePct();
+        Double kelly = kellyFraction;
+        if (kelly == null || !Double.isFinite(kelly)) {
+            return maxLoss;
+        }
+        return Math.min(maxLoss, Math.min(cfg.kellyCapPct(), kelly * 100.0));
     }
 
     /**
@@ -174,10 +201,12 @@ public class RiskManager {
     }
 
     /**
-     * Расчёт объёма: maxLoss = deposit * pct%; volume = maxLoss / |entry - sl| / lotSize.
+     * Расчёт объёма: maxLoss = deposit * riskPct%; volume = maxLoss / |entry - sl| / lotSize.
+     *
+     * <p>riskPct — минимум из max_loss, потолка Келли и самой оценки Келли.
      */
     int calculatePositionSize(double entry, double sl, int lotSize, double deposit, RiskConfig cfg) {
-        double maxLoss = deposit * cfg.maxLossPerTradePct() / 100.0;
+        double maxLoss = deposit * effectiveRiskPct(cfg) / 100.0;
         double priceDiff = Math.abs(entry - sl);
         if (priceDiff <= 0) return 0;
         double rawVolume = maxLoss / priceDiff / lotSize;

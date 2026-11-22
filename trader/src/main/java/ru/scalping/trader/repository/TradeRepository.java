@@ -94,6 +94,24 @@ public class TradeRepository {
     }
 
     /**
+     * PnL последних закрытых сделок для оценки Келли (шаг 1.7).
+     *
+     * <p>Закрытые — исходы {@code TradeResultPublisher}: CLOSED, SL_HIT, TP_HIT, TIMEOUT_CLOSED.
+     * Открытые и отклонённые не входят: результата у них нет.
+     */
+    public List<Double> recentClosedPnls(int limit) {
+        return jdbc.query("""
+                        SELECT pnl FROM trade_results
+                        WHERE pnl IS NOT NULL
+                          AND status IN ('CLOSED', 'SL_HIT', 'TP_HIT', 'TIMEOUT_CLOSED')
+                        ORDER BY closed_at DESC NULLS LAST
+                        LIMIT ?
+                        """,
+                (rs, rowNum) -> rs.getDouble("pnl"),
+                limit);
+    }
+
+    /**
      * Лотность инструмента из справочника (владелец записи — Collector).
      *
      * @return {@code instruments.lot} либо {@code 1}, если записи нет или значение не задано
