@@ -40,18 +40,19 @@
 
 ## 4. Издержки, метка, дисперсии, VR
 
-- [ ] 4.1 `research/costs.py`: круг в тиках (ставка, минкомиссия, спред), флаг `UNVERIFIED`,
+- [x] 4.1 `research/costs.py`: круг в тиках (ставка, минкомиссия, спред), флаг `UNVERIFIED`,
       стресс `×1.5`; тесты `tests/test_research_costs.py`
-- [ ] 4.2 `research/labels.py`: вариант метки, `h_max`, запись в registry; тесты
+- [x] 4.2 `research/labels.py`: вариант метки, `h_max`, запись в registry; тесты
       `tests/test_research_labels.py`
-- [ ] 4.3 `research/variance.py`: Parkinson/GK/RS, диагностика шума, `VR(τ)`, `σ_τ`,
+- [x] 4.3 `research/variance.py`: Parkinson/GK/RS, диагностика шума, `VR(τ)`, `σ_τ`,
       десезонализация; тесты `tests/test_research_variance.py` (включая запрет `σ√τ` без `VR`)
 
 ## 5. Реестр опытов
 
-- [ ] 5.1 `research/registry.py`: структура записи, id, чтение `N_trials`; тесты
+- [x] 5.1 `research/registry.py`: структура записи, id, чтение `N_trials`; тесты
       `tests/test_research_registry.py`
 - [ ] 5.2 проверка, что артефакты этапа несут id записи; критерий «DSR без registry» даёт отказ
+      (отказ реализован и покрыт тестом; привязка id к артефактам — в блоке CLI/`report`, задача 6.x)
 
 ## 6. CLI и обвязка
 
