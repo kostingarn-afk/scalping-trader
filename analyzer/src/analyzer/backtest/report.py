@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
 
+from .gate import format_gate_block
 from .models import BacktestResult, ExitReason, Trade
 
 # Сколько строк печатать в таблице лучших прогонов (перебор TP/SL и прочие варианты).
@@ -142,6 +143,7 @@ def format_markdown(
             "",
         ]
     )
+    lines.extend(format_gate_block(results))
     lines.extend(_leaders_block(results))
     lines.extend(_exits_block(results))
     return "\n".join(lines)
