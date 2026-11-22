@@ -17,7 +17,7 @@ from .commission import TARIFFS, CommissionModel
 from .execution import ExecutionModel
 from .engine import StrategyFn, atr_pct_quantile, run_backtest
 from .loader import HistoryDataset, aggregate, load_dataset, scan_dir
-from .models import BacktestResult, Bar, Instrument, RunConfig
+from .models import BacktestResult, Bar, EvGateConfig, Instrument, RunConfig
 from .nullmodel import format_null_markdown, run_null
 from .panel import (
     SIGNAL_MODES,
@@ -94,6 +94,27 @@ def build_parser() -> argparse.ArgumentParser:
             "перебор пар TP:SL через запятую, например 2:1.5,3:2,4:2.5; "
             "пусто — один прогон по --atr-tp/--atr-sl; заданные пары отключают цель от комиссии"
         ),
+    )
+    parser.add_argument(
+        "--ev-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "вход только при положительной ожидаемой доходности по закрытым сделкам "
+            "(по умолчанию включён; --no-ev-gate — сравнение с прогонами до шага)"
+        ),
+    )
+    parser.add_argument(
+        "--ev-min-trades",
+        type=int,
+        default=50,
+        help="сколько закрытых сделок нужно, чтобы гейт ожидаемой доходности начал действовать",
+    )
+    parser.add_argument(
+        "--ev-window",
+        type=int,
+        default=200,
+        help="сколько последних закрытых сделок участвует в оценке EV",
     )
     parser.add_argument(
         "--strategy",
@@ -307,6 +328,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             fill_on_next_bar_open=not args.fill_on_close,
             daily_loss_stop_pct=args.daily_stop,
             entry_after_msk_minutes=_parse_msk_time(args.entry_after_msk),
+            ev_gate=EvGateConfig(
+                enabled=args.ev_gate,
+                min_trades=args.ev_min_trades,
+                window=args.ev_window,
+            ),
             execution=ExecutionModel(
                 spread_bps=args.spread_bps,
                 impact_bps_at_full=args.impact_bps,

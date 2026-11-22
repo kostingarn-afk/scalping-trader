@@ -117,9 +117,10 @@ rejectReason, quantityLots)`: проверки идут в фиксирован�
 | 2 | Корреляция | `correlation_threshold` = 0.8 | `correlation > threshold` (строго) | `correlation limit` |
 | 3 | Число позиций | `max_open_positions` = 3 | `size >= max` и инструмента нет среди открытых | `max_open_positions reached` |
 | 4 | Rate-limit | `max_trades_per_minute` = 10 | скользящее окно 1 минута, старые моменты вытесняются | `rate_limit exceeded` |
-| 5 | Размер позиции | `max_loss_per_trade_pct` = 1.0, `kelly_cap_pct` = 1.0, оценка Келли | риск = `min(max_loss, kelly_cap_pct, Келли·100)`; без оценки Келли — только `max_loss`; `floor(deposit*risk/100 / \|entry-sl\| / lotSize)`; `< 1` → отказ | `position_size too small` |
-| 6 | Лимит номинала | `max_position_notional_pct` = 100.0 | `floor(deposit*pct/100 / (price*lotSize))`, объём **урезается**; `< 1` → отказ | `notional limit` |
-| 7 | Комиссионный фильтр | `commission_profit_ratio` = 3.0, `commission_rate_per_side` = 0.0005 | `\|tp-entry\|*units >= ratio*rate*entry*units*2` (порог 0.30 %); при `tp <= 0` пропускается | `commission filter` |
+| 5 | Ожидаемая доходность | `ev_min_trades` = 50, оценка EV | `EV = p·avgWin − (1−p)·avgLoss` по закрытым сделкам; при `EV ≤ 0` отказ; нет оценки — правило не действует | `negative EV` |
+| 6 | Размер позиции | `max_loss_per_trade_pct` = 1.0, `kelly_cap_pct` = 1.0, оценка Келли | риск = `min(max_loss, kelly_cap_pct, Келли·100)`; без оценки Келли — только `max_loss`; `floor(deposit*risk/100 / \|entry-sl\| / lotSize)`; `< 1` → отказ | `position_size too small` |
+| 7 | Лимит номинала | `max_position_notional_pct` = 100.0 | `floor(deposit*pct/100 / (price*lotSize))`, объём **урезается**; `< 1` → отказ | `notional limit` |
+| 8 | Комиссионный фильтр | `commission_profit_ratio` = 3.0, `commission_rate_per_side` = 0.0005 | `\|tp-entry\|*units >= ratio*rate*entry*units*2` (порог 0.30 %); при `tp <= 0` пропускается | `commission filter` |
 
 Детали при чтении кода: rate-limit расходуется до расчёта объёма (отказ на шагах 5–7 всё равно
 занимает слот); депозит — константа `trader.deposit` (200 000 ₽), `correlation` всегда `0.0`; доливка
@@ -228,7 +229,7 @@ Flyway включён в `application.yml` (`enabled=true`, `locations=classpath
 | `trade_results` | V1 | История сделок: вход, выход, PnL, комиссия, стопы, статус, отказ | Trader |
 | `positions` | V1 | Текущие открытые позиции (PK — `instrument_id`) | Trader |
 | `orders` | V1 | История заявок | никто: `TradeRepository` сюда не пишет |
-| `risk_config` | V1 (наполнение V2–V6) | Параметры риск-менеджмента без передеплоя | оператор/миграции |
+| `risk_config` | V1 (наполнение V2–V7) | Параметры риск-менеджмента без передеплоя | оператор/миграции |
 | `processed_signals` | V1 (+ индекс в V2) | Дедупликация по `signal_id` | Trader |
 
 **`risk_config`** — key/value (`key`, `value`, `description`, `updated_at`, `updated_by`).
@@ -249,12 +250,19 @@ Flyway включён в `application.yml` (`enabled=true`, `locations=classpath
 | `commission_rate_per_side` | 0.0005 | Ставка за сторону: «Инвестор» 0.003, «Трейдер» 0.0005, «Премиум» 0.0004 (V6 перевела сид на «Трейдера») |
 | `max_position_notional_pct` | 100.0 | Лимит номинала, % депозита; объём урезается до лимита |
 | `kelly_cap_pct` | 1.0 | Потолок риска по Келли, % депозита (0.1–5.0); фактический риск — минимум с `max_loss_per_trade_pct` |
+| `ev_min_trades` | 50 | Минимальная выборка закрытых сделок для гейта ожидаемой доходности (V7) |
 
-**Келли (шаг 1.7).** `KellyEstimator` считает `f = p − (1−p)/b` по последним закрытым сделкам
-(`trade_results`: `CLOSED`, `SL_HIT`, `TP_HIT`, `TIMEOUT_CLOSED`), `KellyPoller` обновляет оценку
-раз в 5 минут (`trader.poll-kelly-cron`). Меньше 20 сделок — оценки нет, риск равен
-`max_loss_per_trade_pct`. Отрицательная Келли даёт нулевой размер и отказ `position_size too small`.
-Потолок выше `max_loss_per_trade_pct` не действует, пока тот не поднят: `min` возвращает меньший.
+**Келли и EV (шаги 1.7 и 1.10).** `KellyEstimator` считает `f = p − (1−p)/b` по последним закрытым
+сделкам (`trade_results`: `CLOSED`, `SL_HIT`, `TP_HIT`, `TIMEOUT_CLOSED`), `RiskStatsPoller`
+обновляет его и ожидаемую доходность раз в 5 минут (`trader.poll-stats-cron`), одним запросом.
+Меньше 20 сделок — оценки Келли нет, риск равен `max_loss_per_trade_pct`. Отрицательная Келли даёт
+нулевой размер и отказ `position_size too small`. Потолок выше `max_loss_per_trade_pct` не действует,
+пока тот не поднят: `min` возвращает меньший.
+
+**EV-гейт (шаг 1.10).** `EvEstimator` считает `EV = p·avgWin − (1−p)·avgLoss` по тем же pnl;
+меньше `ev_min_trades` закрытых сделок или односторонняя выборка — оценки нет. При `EV ≤ 0` сигнал
+отклоняется с причиной `negative EV` до расчёта объёма. Гейт начнёт действовать только после того,
+как закрытие сделок начнёт писаться в `trade_results` (§5.1 `to_do.md`, шаг 3.1).
 
 Правка лимита — обычный `UPDATE`, применение в пределах polling-интервала:
 

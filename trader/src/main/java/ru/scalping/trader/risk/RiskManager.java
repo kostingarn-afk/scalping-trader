@@ -37,6 +37,8 @@ public class RiskManager {
     private volatile boolean pnlCircuitBreakerActive = false;
     /** Оценка Келли (доля капитала) по закрытым сделкам; {@code null} — оценки нет. */
     private volatile Double kellyFraction;
+    /** Ожидаемая доходность сделки, ₽; {@code null} — оценки нет (мало закрытых сделок). */
+    private volatile Double expectedValue;
 
     public RiskManager(Clock clock) {
         this.clock = clock;
@@ -84,6 +86,16 @@ public class RiskManager {
 
     public Double kellyFraction() {
         return kellyFraction;
+    }
+
+    /** Обновить ожидаемую доходность; {@code null} — статистики нет, гейт не действует. */
+    public void updateExpectedValue(Double ev) {
+        this.expectedValue = ev;
+        log.info("Expected value updated: {}", ev);
+    }
+
+    public Double expectedValue() {
+        return expectedValue;
     }
 
     /**
@@ -155,20 +167,26 @@ public class RiskManager {
             return RiskCheckResult.rejected("rate_limit exceeded");
         }
 
-        // 4. Динамический размер позиции
+        // 4. Ожидаемая доходность: при отрицательном EV сделка не нужна, а размер считать
+        // незачем. Оценки нет (мало закрытых сделок) — правило не действует.
+        if (expectedValue != null && Double.isFinite(expectedValue) && expectedValue <= 0) {
+            return RiskCheckResult.rejected("negative EV");
+        }
+
+        // 5. Динамический размер позиции
         int quantityLots = calculatePositionSize(suggestedPrice, suggestedSl, lotSize, deposit, cfg);
         if (quantityLots < 1) {
             return RiskCheckResult.rejected("position_size too small");
         }
 
-        // 5. Лимит объёма: номинал, а не риск. Объём урезается, а не отклоняется — при риске
+        // 6. Лимит объёма: номинал, а не риск. Объём урезается, а не отклоняется — при риске
         // 1 % и узком стопе расчётный объём легко превышает депозит.
         quantityLots = capByNotional(quantityLots, suggestedPrice, lotSize, deposit, cfg);
         if (quantityLots < 1) {
             return RiskCheckResult.rejected("notional limit");
         }
 
-        // 6. Комиссионный фильтр: ожидаемая прибыль до TP должна покрыть ratio комиссий круга.
+        // 7. Комиссионный фильтр: ожидаемая прибыль до TP должна покрыть ratio комиссий круга.
         if (suggestedTp > 0
                 && !passesCommissionFilter(suggestedPrice, suggestedTp, quantityLots, lotSize, cfg)) {
             return RiskCheckResult.rejected("commission filter");

@@ -3,6 +3,7 @@ package ru.scalping.trader.risk;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RiskManagerTest {
 
@@ -103,6 +104,50 @@ class RiskManagerTest {
     }
 
     @Test
+    void negativeExpectedValueRejectsSignal() {
+        RiskManager rm = new RiskManager();
+        rm.updateExpectedValue(-12.5);
+
+        RiskCheckResult result = rm.check("SBER", 100.0, 99.0, 102.0, 1, 200_000, 0.0);
+
+        assertThat(result.allowed()).isFalse();
+        assertThat(result.rejectReason()).isEqualTo("negative EV");
+    }
+
+    @Test
+    void zeroExpectedValueRejectsSignal() {
+        RiskManager rm = new RiskManager();
+        rm.updateExpectedValue(0.0);
+
+        assertThat(rm.check("SBER", 100.0, 99.0, 102.0, 1, 200_000, 0.0).allowed()).isFalse();
+    }
+
+    @Test
+    void positiveExpectedValueAllowsSignal() {
+        RiskManager rm = new RiskManager();
+        rm.updateExpectedValue(35.0);
+
+        assertThat(rm.check("SBER", 100.0, 99.0, 102.0, 1, 200_000, 0.0).allowed()).isTrue();
+    }
+
+    @Test
+    void missingExpectedValueKeepsPreviousBehaviour() {
+        RiskManager rm = new RiskManager();
+
+        assertThat(rm.check("SBER", 100.0, 99.0, 102.0, 1, 200_000, 0.0).allowed()).isTrue();
+    }
+
+    @Test
+    void evMinTradesOutsideRangeIsRejected() {
+        assertThatThrownBy(() -> new RiskConfig(1.0, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.0005,
+                100.0, 1.0, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ev_min_trades");
+        assertThat(RiskConfig.fromMap(java.util.Map.of("ev_min_trades", "25")).evMinTrades())
+                .isEqualTo(25);
+    }
+
+    @Test
     void commissionFilterPassesSameTargetOnTraderTariff() {
         RiskManager rm = new RiskManager();
         rm.updateConfig(withCommissionRate(0.0005));
@@ -125,7 +170,7 @@ class RiskManagerTest {
         return new RiskConfig(d.maxLossPerTradePct(), d.pnlCircuitBreakerPct(),
                 d.commissionProfitRatio(), d.maxOpenPositions(), d.maxHoldingTimeMinutes(),
                 d.correlationThreshold(), d.maxTradesPerMinute(), d.entryAfterMskMinutes(),
-                d.commissionRatePerSide(), notionalPct, d.kellyCapPct());
+                d.commissionRatePerSide(), notionalPct, d.kellyCapPct(), d.evMinTrades());
     }
 
     private static RiskConfig withCommissionRate(double ratePerSide) {
@@ -133,6 +178,6 @@ class RiskManagerTest {
         return new RiskConfig(d.maxLossPerTradePct(), d.pnlCircuitBreakerPct(),
                 d.commissionProfitRatio(), d.maxOpenPositions(), d.maxHoldingTimeMinutes(),
                 d.correlationThreshold(), d.maxTradesPerMinute(), d.entryAfterMskMinutes(),
-                ratePerSide, d.maxPositionNotionalPct(), d.kellyCapPct());
+                ratePerSide, d.maxPositionNotionalPct(), d.kellyCapPct(), d.evMinTrades());
     }
 }

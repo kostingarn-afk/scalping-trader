@@ -9,7 +9,7 @@ import static org.assertj.core.api.Assertions.offset;
 class KellySizingTest {
 
     private static RiskConfig config(double maxLossPct, double kellyCapPct) {
-        return new RiskConfig(maxLossPct, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.003, 100.0, kellyCapPct);
+        return new RiskConfig(maxLossPct, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.003, 100.0, kellyCapPct, 50);
     }
 
     @Test

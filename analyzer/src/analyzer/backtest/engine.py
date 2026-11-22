@@ -19,6 +19,7 @@ from ..indicators import Indicators, compute_all, compute_atr_pct_series
 from ..strategy import Signal, SignalType, mean_reversion, with_target
 from .commission import CommissionModel
 from .execution import ExecutionModel
+from .ev_gate import estimate as ev_estimate
 from .models import (
     Bar,
     BacktestResult,
@@ -102,7 +103,7 @@ def run_backtest(
     volumes = np.fromiter((bar.volume for bar in bar_list), dtype=np.int64, count=len(bar_list))
 
     trades: List[Trade] = []
-    signals = filtered = skipped = 0
+    signals = filtered = skipped = skipped_by_ev = 0
     position: Optional[_OpenPosition] = None
     last_exit_index: Optional[int] = None
     index = 0
@@ -212,6 +213,18 @@ def run_backtest(
             continue
         signals += 1
 
+        # Гейт ожидаемой доходности (шаг 1.10): стоит до комиссионного фильтра — он дешевле
+        # и содержательнее. Оценка строится только по уже закрытым сделкам, поэтому
+        # заглядывания в будущее нет; на малой выборке гейт не действует.
+        if cfg.ev_gate.enabled:
+            estimate = ev_estimate(
+                trades, cfg.ev_gate.min_trades, cfg.ev_gate.window
+            )
+            if estimate is not None and not estimate.is_positive:
+                skipped_by_ev += 1
+                index += 1
+                continue
+
         entry_price = bar_list[fill_index].open if cfg.fill_on_next_bar_open else bar.close
 
         if not passes_commission_filter(signal, entry_price, instrument, model, cfg):
@@ -259,6 +272,7 @@ def run_backtest(
         skipped=skipped,
         trades=trades,
         open_at_end=position is not None,
+        skipped_by_ev=skipped_by_ev,
         label=label,
         strategy=strategy_name,
     )
@@ -451,6 +465,7 @@ def _result(
     skipped: int,
     trades: List[Trade],
     open_at_end: bool = False,
+    skipped_by_ev: int = 0,
     label: str = "",
     strategy: str = "",
 ) -> BacktestResult:
@@ -468,6 +483,7 @@ def _result(
         equity_final=equity,
         max_drawdown_pct=drawdown,
         open_at_end=open_at_end,
+        skipped_by_ev=skipped_by_ev,
         label=label,
         strategy=strategy,
     )

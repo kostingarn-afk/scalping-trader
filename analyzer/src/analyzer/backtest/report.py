@@ -49,6 +49,8 @@ class Summary:
     # Выходы по дневному лимиту убытка. Отдельным полем, а не в тройке TP/SL/TIMEOUT:
     # колонка отчёта остаётся совместимой, а тип выхода виден в блоке «Выходы».
     daily_stops: int = 0
+    # Сигналы, отсечённые гейтом ожидаемой доходности (шаг 1.10).
+    skipped_by_ev: int = 0
 
 
 def summarize(result: BacktestResult) -> Summary:
@@ -90,6 +92,7 @@ def summarize(result: BacktestResult) -> Summary:
         equity_final=result.equity_final,
         open_at_end=result.open_at_end,
         daily_stops=exits.get(ExitReason.DAILY_STOP.value, 0),
+        skipped_by_ev=result.skipped_by_ev,
     )
 
 
@@ -114,16 +117,17 @@ def format_markdown(
     lines.extend(
         [
             "",
-            "| Прогон | Бары | Сигналы | Фильтр | Пропуск | Сделок | Win % | TP/SL/TO "
+            "| Прогон | Бары | Сигналы | Фильтр | EV | Пропуск | Сделок | Win % | TP/SL/TO "
             "| Expectancy ₽ | Expectancy % | Итог ₽ | Итог % | Max DD % | Комиссия ₽ | Открыта |",
-            "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---|",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for result in results:
         summary = summarize(result)
         lines.append(
             f"| {summary.run} | {summary.bars} | {summary.signals} | "
-            f"{summary.filtered_signals} | {summary.skipped_by_notional} | {summary.trades} | "
+            f"{summary.filtered_signals} | {summary.skipped_by_ev} | "
+            f"{summary.skipped_by_notional} | {summary.trades} | "
             f"{summary.win_rate_pct:.1f} | "
             f"{summary.take_profits}/{summary.stop_losses}/{summary.timeouts} | "
             f"{_money(summary.avg_net_rub)} | {summary.expectancy_pct:.4f} | "
@@ -136,7 +140,9 @@ def format_markdown(
             "",
             "Колонки: «Сигналы» — сигналы, полученные при отсутствии открытой позиции "
             "(поэтому позиции в работе не порождают сигналов); «Фильтр» — сигналы, отброшенные "
-            "комиссионным фильтром; «Пропуск» — сигналы без позиции из-за лимита номинала; "
+            "комиссионным фильтром; «EV» — сигналы, отброшенные гейтом ожидаемой доходности "
+            "(после накопления минимальной выборки закрытых сделок); «Пропуск» — сигналы без "
+            "позиции из-за лимита номинала; "
             "TP/SL/TO — распределение выходов; «Открыта» — позиция осталась открытой на конец "
             "выгрузки и в сделках/PnL не учтена. Сигнал на последнем баре, для которого нет "
             "следующего бара под вход, в счётчиках сделок не отражается.",
@@ -191,6 +197,13 @@ def _parameters_line(results: Sequence[BacktestResult]) -> str:
         )
         if first.execution.permanent_bps_at_full:
             line += f" + постоянный {first.execution.permanent_bps_at_full:g} б.п."
+    gate = first.ev_gate
+    if gate.enabled:
+        line += (
+            f", EV-гейт: окно {gate.window} сделок, минимум {gate.min_trades}"
+        )
+    else:
+        line += ", EV-гейт выключен"
     line += "."
     strategy = results[0].strategy
     if strategy:

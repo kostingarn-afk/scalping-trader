@@ -94,6 +94,25 @@ class Trade:
 
 
 @dataclass(frozen=True)
+class EvGateConfig:
+    """Гейт входа по ожидаемой доходности (шаг 1.10).
+
+    `min_trades` — сколько закрытых сделок нужно, чтобы оценка вообще имела смысл; `window` —
+    сколько последних сделок участвует. До накопления `min_trades` гейт не действует.
+    """
+
+    enabled: bool = True
+    min_trades: int = 50
+    window: int = 200
+
+    def __post_init__(self) -> None:
+        if self.min_trades < 1:
+            raise ValueError("ev_gate.min_trades must be at least 1")
+        if self.window < self.min_trades:
+            raise ValueError("ev_gate.window must not be less than min_trades")
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """Параметры прогона.
 
@@ -137,6 +156,8 @@ class RunConfig:
     # 660 = 11:00 МСК: первый час основной сессии по замеру 2026-11-21 даёт −3.8 б.п. дрейфа
     # (t −2.53), и входить в него невыгодно. Зеркало `entry_after_msk_minutes` в Trader.
     entry_after_msk_minutes: int = 0
+    # Вход только при положительной ожидаемой доходности по фактическим исходам (шаг 1.10).
+    ev_gate: EvGateConfig = EvGateConfig()
 
     def __post_init__(self) -> None:
         if self.deposit <= 0:
@@ -183,6 +204,9 @@ class BacktestResult:
     # Позиция, открытая к концу выгрузки: в сделках и PnL не учитывается, но должна быть видна
     # в отчёте — иначе сигнал «теряется» без следа.
     open_at_end: bool = False
+    # Сигналы, отброшенные гейтом ожидаемой доходности (шаг 1.10): видно, сколько входов
+    # не состоялось из-за отрицательного EV, а не из-за комиссии или лимита номинала.
+    skipped_by_ev: int = 0
     # Метка варианта прогона (например `tp3/sl2` или `v2-z2-adx25` при переборе): отличает
     # строки отчёта, у которых `instrument`/`interval_minutes`/`tariff` совпадают.
     label: str = ""

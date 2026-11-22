@@ -8,7 +8,7 @@ import pytest
 
 from analyzer.backtest import engine
 from analyzer.backtest.commission import CommissionModel
-from analyzer.backtest.models import Bar, Direction, ExitReason, Instrument, RunConfig
+from analyzer.backtest.models import Bar, Direction, EvGateConfig, ExitReason, Instrument, RunConfig
 from analyzer.backtest.report import format_markdown
 from analyzer.strategy import Signal, SignalType
 
@@ -392,6 +392,48 @@ def test_target_policy_skipped_when_tp_disabled():
     trade = _run(bars, _config(min_tp_pct=1.2, no_tp=True)).trades[0]
 
     assert trade.tp is None
+
+
+def test_ev_gate_blocks_entry_after_negative_estimate():
+    """Крупный проигрыш и небольшой выигрыш дают отрицательный EV — входы отсекаются."""
+    strategy = _always_buy(sl_factor=0.99, tp_factor=1.004)
+    bars = _flat_bars(25)
+    bars.append(_bar(25, close=98.9, high=100.2, low=98.8))   # SL первого входа (−2400 ₽)
+    bars.append(_bar(26, close=99.0, high=99.1, low=98.9))    # вход второго, ровный бар
+    bars.append(_bar(27, close=99.5, high=99.6, low=99.0))    # TP второго входа (+600 ₽)
+    bars.extend(_bar(minute, close=99.5) for minute in range(28, 70))
+
+    result = _run(bars, _config(ev_gate=EvGateConfig(min_trades=2, window=10)), strategy)
+
+    assert len(result.trades) == 2, "после отрицательной оценки новых входов быть не должно"
+    assert result.skipped_by_ev > 0
+
+
+def test_ev_gate_disabled_keeps_trading():
+    bars = _flat_bars(120)
+
+    result = _run(bars, _config(ev_gate=EvGateConfig(enabled=False)))
+
+    assert result.skipped_by_ev == 0
+    assert len(result.trades) > 2
+
+
+def test_ev_gate_inactive_before_minimum_sample():
+    bars = _flat_bars(120)
+
+    # Нужно 5 сделок, а гейт проверяется до входа: первые сделки проходят без оценки.
+    result = _run(bars, _config(ev_gate=EvGateConfig(min_trades=5, window=10)))
+
+    assert len(result.trades) >= 5
+
+def test_ev_gate_inactive_for_one_sided_sample():
+    """Все сделки прибыльны — оценки нет, гейт не действует (нельзя вменять «100 % побед»)."""
+    bars = [_bar(minute, close=100.0 + 0.5 * minute) for minute in range(200)]
+
+    result = _run(bars, _config(ev_gate=EvGateConfig(min_trades=2, window=10)))
+
+    assert result.skipped_by_ev == 0
+    assert len(result.trades) > 2
 
 
 def test_no_tp_ignores_target_and_holds_to_timeout():

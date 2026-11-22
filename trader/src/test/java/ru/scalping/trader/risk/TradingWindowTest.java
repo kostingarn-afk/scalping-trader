@@ -30,7 +30,8 @@ class TradingWindowTest {
                 minutes,
                 DEFAULT.commissionRatePerSide(),
                 DEFAULT.maxPositionNotionalPct(),
-                DEFAULT.kellyCapPct()
+                DEFAULT.kellyCapPct(),
+                DEFAULT.evMinTrades()
         );
     }
 

@@ -22,12 +22,18 @@ public record RiskConfig(
         /** Лимит номинала позиции в % депозита: страховка от неисполнимых объёмов. */
         double maxPositionNotionalPct,
         /** Потолок риска по Келли, % депозита (решение 4: 0.1–5.0). */
-        double kellyCapPct
+        double kellyCapPct,
+        /** Минимальная выборка закрытых сделок для гейта ожидаемой доходности (шаг 1.10). */
+        int evMinTrades
 ) {
     public RiskConfig {
         if (kellyCapPct < 0.1 || kellyCapPct > 5.0) {
             throw new IllegalArgumentException(
                     "kelly_cap_pct must be in [0.1, 5.0], got " + kellyCapPct);
+        }
+        if (evMinTrades < 1) {
+            throw new IllegalArgumentException(
+                    "ev_min_trades must be at least 1, got " + evMinTrades);
         }
     }
 
@@ -44,12 +50,13 @@ public record RiskConfig(
                 Integer.parseInt(m.getOrDefault("entry_after_msk_minutes", "660")),
                 Double.parseDouble(m.getOrDefault("commission_rate_per_side", "0.0005")),
                 Double.parseDouble(m.getOrDefault("max_position_notional_pct", "100.0")),
-                Double.parseDouble(m.getOrDefault("kelly_cap_pct", "1.0"))
+                Double.parseDouble(m.getOrDefault("kelly_cap_pct", "1.0")),
+                Integer.parseInt(m.getOrDefault("ev_min_trades", "50"))
         );
     }
 
-    /** Значения по умолчанию (синхронны с сидом V2, дополнены V3–V6). */
+    /** Значения по умолчанию (синхронны с сидом V2, дополнены V3–V7). */
     public static RiskConfig defaults() {
-        return new RiskConfig(1.0, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.0005, 100.0, 1.0);
+        return new RiskConfig(1.0, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.0005, 100.0, 1.0, 50);
     }
 }
