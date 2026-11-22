@@ -42,6 +42,9 @@ def _curve() -> EVCurve:
                 ev_ucb=0.6, paths=200, clusters=20),
         EVPoint(tau=5, p_tp=0.6, p_sl=0.3, p_n=0.1, ev=1.0, var=1.0, ev_lcb=0.8,
                 ev_ucb=1.2, paths=200, clusters=20),
+        # Сетка продолжается за оптимум: иначе `select_tau` даёт BOUNDARY, и вход запрещён (R1).
+        EVPoint(tau=20, p_tp=0.3, p_sl=0.5, p_n=0.2, ev=0.2, var=1.0, ev_lcb=0.1,
+                ev_ucb=0.3, paths=200, clusters=20),
     )
     return EVCurve(
         tp_ticks=4, sl_ticks=2, cost_ticks=0.5, protocol="SL_FIRST_EMPIRICAL_1M",
@@ -203,7 +206,7 @@ def test_entry_blocked_without_tau(hold_moments):
 
     assert result.trades == ()
     assert result.no_trade_counts[NO_THETA] == 1
-    assert result.tau_max == 0
+    assert result.tau_max is None
 
 
 def test_entry_blocked_by_sanity_when_d_not_above_cost(hold_moments):
@@ -289,3 +292,38 @@ def test_trade_marks_sample_relative_to_train_boundary(hold_moments):
 
     assert in_train.trades[0].sample == "train"
     assert in_oos.trades[0].sample == "oos"
+
+
+def test_execution_reduces_horizon_by_mtf_tau(hold_moments):
+    """Редукция 10m: `mtf_tau_minutes` укорачивает горизонт, а не закрывает сразу (R5)."""
+    signal = Signal(session=0, index=2, direction=1, z=-3.0, price=100.0, anchor=100.40)
+
+    plain = _run([_arrays([100.0] * 12)], signal)
+    reduced = _run(
+        [_arrays([100.0] * 12)], signal, config=_config(mtf_tau_minutes=2)
+    )
+
+    assert plain.trades[0].exit_reason == "TIME_STOP"
+    assert plain.trades[0].tau_actual == 5
+    assert reduced.trades[0].exit_reason == "TIME_STOP"
+    assert reduced.trades[0].tau_actual == 2
+    assert reduced.trades[0].tau_planned == 2
+
+
+def test_execution_exits_on_vol_spike_after_half_horizon(hold_moments):
+    """`vol_spike` — редукция: после половины горизонта она завершает выход (R5)."""
+    session = _arrays([100.0] * 12, spread=0.01)
+    session["high"] = session["high"].copy()
+    session["low"] = session["low"].copy()
+    # Бар 6 — выброс range при τ=5: step=4 ≥ τ/2, значит редукция закрывает позицию.
+    # Барьер TP=50 тиков (0.5) не задет: 100.2 < 100.5, иначе сработал бы TP.
+    session["high"][6] = 100.2
+    session["low"][6] = 99.8
+    signal = Signal(session=0, index=2, direction=1, z=-3.0, price=100.0, anchor=100.40)
+
+    result = _run(
+        [session], signal, config=_config(tp_ticks=50, sl_ticks=50)
+    )
+
+    assert result.trades[0].exit_reason == "VOL_SPIKE"
+    assert result.trades[0].tau_actual == 4

@@ -187,6 +187,11 @@ def entry_decision(
         return EntryDecision(False, None, None, NO_TAU)
     if selection.verdict == SCOPE_VIOLATION:
         return EntryDecision(False, selection.tau, None, SCOPE_VIOLATION)
+    if selection.verdict == BOUNDARY:
+        # Край сетки: τ* не подтверждён сеткой дальше, поэтому вход запрещён так же, как при
+        # скоупе (R1). Проверка обязана быть здесь: `entry_decision` — единственный гейт,
+        # который читают и CLI, и исполнение.
+        return EntryDecision(False, selection.tau, None, BOUNDARY)
     point = next((item for item in curve.points if item.tau == selection.tau), None)
     if point is None or not point.usable:
         return EntryDecision(False, selection.tau, point, NO_TAU)
@@ -271,6 +276,7 @@ def tau_max_components(
     tau_regime: Optional[int] = None,
     tau_mtf: Optional[int] = None,
     regime_status: str = COMPONENT_MISSING,
+    regime_note: Optional[str] = None,
     step: int = 1,
 ) -> TauMax:
     """Собрать `τ_max = min(τ_edge, τ_regime, τ_mtf, τ_model, τ_liq, τ_session, τ_cap)`.
@@ -301,10 +307,11 @@ def tau_max_components(
         reasons.append("τ_edge не определён: нет τ с EV_LCB > 0 — вход запрещён")
 
     if tau_regime is None:
-        components.append(
-            TauComponent("regime", None, regime_status, "режимная модель не дала горизонт")
-        )
-        reasons.append("τ_regime отсутствует: режимная модель не идентифицирована")
+        # Причина берётся у режимной части: «модель не идентифицирована» и «fav не определён»
+        # требуют разных действий, и один текст на оба случая вводил в заблуждение (m8).
+        note = regime_note or "режимная модель не дала горизонт"
+        components.append(TauComponent("regime", None, regime_status, note))
+        reasons.append(f"τ_regime отсутствует: {note}")
     elif tau_regime <= 0:
         components.append(
             TauComponent(

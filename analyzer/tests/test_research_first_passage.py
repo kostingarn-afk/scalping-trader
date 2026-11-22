@@ -412,8 +412,22 @@ def test_entry_decision_respects_tau_max():
     assert allowed.reason == "OK"
 
 
+def test_entry_decision_blocks_boundary_verdict():
+    """`BOUNDARY` — «сетка коротка»: гейт входа запрещает её так же, как скоуп (R1)."""
+    curve = _curve([_point(1, 0.1, 0.05), _point(10, 1.0, 0.7)])
+    selection = select_tau(curve, waiting_bars=0.0, tau_cap=30)
+    assert selection.verdict == BOUNDARY
+
+    decision = entry_decision(curve, selection, tau_max=60)
+
+    assert decision.allowed is False
+    assert decision.reason == BOUNDARY
+
+
 def test_entry_decision_blocks_nonpositive_lcb():
-    curve = _curve([_point(1, 0.1, -0.05), _point(5, 0.9, -0.2)])
+    curve = _curve(
+        [_point(1, 0.1, -0.05), _point(5, 0.9, -0.2), _point(10, 0.2, 0.1)]
+    )
     selection = select_tau(curve, waiting_bars=1.0, tau_cap=30)
 
     decision = entry_decision(curve, selection, tau_max=60)

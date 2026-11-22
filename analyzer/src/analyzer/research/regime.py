@@ -39,6 +39,10 @@ DEFAULT_ITERATIONS = 200
 GATE2_PASSED = "PASS"
 GATE2_FAILED = "GATE2_FAILED"
 REFERENCE_ONLY = "REFERENCE_ONLY"
+#: Статус направления в артефакте: `fav` не определён — это не `PASS` и не провал Gate 2.
+DIRECTION_PASS = "PASS"
+DIRECTION_LOW_CONFIDENCE = "REGIME_CONFIDENCE"
+DIRECTION_FAV_UNDEFINED = "FAV_UNDEFINED"
 PROXY_IMBALANCE = "PROXY:volume-imbalance"
 LONG = 1
 SHORT = -1
@@ -140,7 +144,7 @@ class RegimeReport:
     instrument: str
     fit: Optional[RegimeFit]
     survival_by_direction: Dict[int, Optional[Survival]]
-    mtf_survival: Optional[Survival]
+    mtf_survival_by_direction: Dict[int, Optional[Survival]]
     tau_regime_minutes: Optional[int]
     tau_mtf_minutes: Optional[int]
     mtf_disagreement: Optional[float]
@@ -148,7 +152,13 @@ class RegimeReport:
 
     @property
     def gate_passed(self) -> Dict[int, bool]:
-        """Гейт `γ_t(fav) ≥ 1−q` по направлениям; `True`, если режим не идентифицирован."""
+        """Блокирующий гейт `γ_t(fav) ≥ 1−q` по направлениям.
+
+        `True` означает «не блокирует»: `False` возвращается только при **измеренной** низкой
+        уверенности. Неизмеренное (модель не построена, Gate 2 провален, `fav` не определён)
+        даёт `REFERENCE_ONLY` и не блокирует вход (M3) — но и не считается `PASS`: причина
+        видна в `gates` (`GATE2_FAILED` / `FAV_UNDEFINED` / `REGIME_CONFIDENCE`).
+        """
         if self.fit is None or not self.fit.gate2_passed:
             return {LONG: True, SHORT: True}
         result: Dict[int, bool] = {}
@@ -157,15 +167,26 @@ class RegimeReport:
             result[direction] = True if item is None else item.gate_passed
         return result
 
+    @property
+    def reference_reason(self) -> str:
+        """Почему `τ_regime` не участвует в `τ_max`: причины различаются и по тексту."""
+        if self.fit is None:
+            return "режимная модель не построена"
+        if not self.fit.gate2_passed:
+            return (
+                f"Gate 2 провален: {self.fit.transitions} смен < "
+                f"{self.fit.gate2_threshold} — режим REFERENCE_ONLY"
+            )
+        if all(item is None for item in self.survival_by_direction.values()):
+            return "fav не определён: знак дрейфа не выделяет одно состояние"
+        return "горизонт режима не посчитан (REFERENCE_ONLY)"
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "instrument": self.instrument,
             "hmm": None if self.fit is None else self.fit.to_dict(),
-            "survival": {
-                "long": _survival_dict(self.survival_by_direction.get(LONG)),
-                "short": _survival_dict(self.survival_by_direction.get(SHORT)),
-            },
-            "mtf_survival": _survival_dict(self.mtf_survival),
+            "survival": _direction_dict(self.survival_by_direction),
+            "mtf_survival": _direction_dict(self.mtf_survival_by_direction),
             "tau_regime_minutes": self.tau_regime_minutes,
             "tau_mtf_minutes": self.tau_mtf_minutes,
             "mtf_disagreement": _number(self.mtf_disagreement),
@@ -187,13 +208,44 @@ def _survival_dict(item: Optional[Survival]) -> Optional[Dict[str, object]]:
     return None if item is None else item.to_dict()
 
 
+def _direction_dict(
+    items: Dict[int, Optional[Survival]]
+) -> Dict[str, Optional[Dict[str, object]]]:
+    """Артефакт по направлениям: порядок ключей фиксирован, отсутствие — `null`."""
+    return {
+        "long": _survival_dict(items.get(LONG)),
+        "short": _survival_dict(items.get(SHORT)),
+    }
+
+
+def _direction_status(item: Optional[Survival]) -> str:
+    """Статус направления: `PASS` не выдаётся за `FAV_UNDEFINED` (m9)."""
+    if item is None:
+        return DIRECTION_FAV_UNDEFINED
+    return DIRECTION_PASS if item.gate_passed else DIRECTION_LOW_CONFIDENCE
+
+
+def trusted_tau(survival_by_direction: Dict[int, Optional[Survival]]) -> Optional[int]:
+    """Минимум `τ` по направлениям, чей гейт пройден (R4).
+
+    Направление без `fav` (`None`) и направление с проваленным гейтом в минимум не входят:
+    первое — неизмеренное, второе — `REFERENCE_ONLY` на входе. Если доверенных направлений нет,
+    горизонт не определён (`None`), а не ноль: ноль означал бы измеренный отказ удержания.
+    """
+    trusted = [
+        item.tau_minutes
+        for item in survival_by_direction.values()
+        if item is not None and item.gate_passed
+    ]
+    return min(trusted) if trusted else None
+
+
 def aggregate_minutes(arrays: SessionArrays, minutes: int) -> SessionArrays:
     """Свернуть минутные бары окна в бары по `minutes` минут.
 
     Корзины считаются от первого бара окна, а не от начала часа: окно, начавшееся не на границе
     часа, иначе дало бы неполную первую корзину. Неполная корзина (в ней меньше `minutes`
-    минут) всё равно возвращается, но её длина в минутах считается по фактическим барам и
-    видна вызывающему через `bars`.
+    минут) всё равно возвращается: её фактическая длина видна по длине массивов результата.
     """
     if minutes < 1:
         raise RegimeError("minutes must be at least 1")
@@ -565,7 +617,7 @@ def evaluate_regime(
             instrument=instrument,
             fit=fit,
             survival_by_direction={LONG: None, SHORT: None},
-            mtf_survival=None,
+            mtf_survival_by_direction={LONG: None, SHORT: None},
             tau_regime_minutes=None,
             tau_mtf_minutes=None,
             mtf_disagreement=None,
@@ -580,12 +632,10 @@ def evaluate_regime(
     for direction in (LONG, SHORT):
         fav = fit.fav(direction)
         survival_by_direction[direction] = None if fav is None else survivals[fav]
-    tau_regime = _min_tau(
-        [
-            item.tau_minutes if item is not None else None
-            for item in survival_by_direction.values()
-        ]
-    )
+
+    # В `τ_regime` участвуют только направления, прошедшие гейт: провал гейта — `REFERENCE_ONLY`,
+    # и его горизонт не должен обрезать горизонт направления, которому режим доверяет (R4).
+    tau_regime = trusted_tau(survival_by_direction)
 
     mtf_pairs: List[Tuple[SessionArrays, SessionArrays]] = []
     for session, _ in htf_pairs:
@@ -613,24 +663,38 @@ def evaluate_regime(
     mtf_counts, _ = markov_counts(
         tuple(int(state) for state in mtf_canonical), _session_of(mtf_lengths)
     )
-    # 10m-выживание считается по `fav` лонга: знак дрейфа на 10m тот же по построению.
-    mtf_state = fit.fav(LONG)
-    mtf_survival = (
-        survival(mtf_counts, state=mtf_state, q=q, htf_minutes=mtf_minutes)
-        if mtf_state is not None
-        else None
-    )
-    tau_mtf = tau_regime
-    if disagreement is not None and disagreement > MTF_DISAGREEMENT_LIMIT:
-        tau_mtf = _min_tau(
-            [tau_regime, mtf_survival.tau_minutes if mtf_survival is not None else None]
+    # 10m-выживание — по `fav` того же направления: состояния сопоставляются через один `fit`,
+    # и подставлять лонговое состояние шорту нельзя (m11).
+    mtf_survival_by_direction: Dict[int, Optional[Survival]] = {}
+    tau_mtf_by_direction: Dict[int, Optional[int]] = {}
+    reduce_by_mtf = disagreement is not None and disagreement > MTF_DISAGREEMENT_LIMIT
+    for direction in (LONG, SHORT):
+        fav = fit.fav(direction)
+        item = (
+            survival(mtf_counts, state=fav, q=q, htf_minutes=mtf_minutes)
+            if fav is not None
+            else None
         )
+        mtf_survival_by_direction[direction] = item
+        htf_item = survival_by_direction[direction]
+        base = (
+            htf_item.tau_minutes if htf_item is not None and htf_item.gate_passed else None
+        )
+        if base is None:
+            tau_mtf_by_direction[direction] = None
+        elif reduce_by_mtf:
+            tau_mtf_by_direction[direction] = _min_tau(
+                [base, item.tau_minutes if item is not None else None]
+            )
+        else:
+            tau_mtf_by_direction[direction] = base
+    tau_mtf = _min_tau(list(tau_mtf_by_direction.values()))
 
     gates = {
         "regime": GATE2_PASSED,
         "survival": "; ".join(
             f"{'long' if direction == LONG else 'short'}:"
-            f"{'PASS' if survival_by_direction[direction] is None else ('PASS' if survival_by_direction[direction].gate_passed else 'REGIME_CONFIDENCE')}"
+            f"{_direction_status(survival_by_direction[direction])}"
             for direction in (LONG, SHORT)
         ),
     }
@@ -643,7 +707,7 @@ def evaluate_regime(
         instrument=instrument,
         fit=fit,
         survival_by_direction=survival_by_direction,
-        mtf_survival=mtf_survival,
+        mtf_survival_by_direction=mtf_survival_by_direction,
         tau_regime_minutes=tau_regime,
         tau_mtf_minutes=tau_mtf,
         mtf_disagreement=disagreement,
@@ -667,7 +731,7 @@ def _empty_report(instrument: str, reason: str) -> RegimeReport:
         instrument=instrument,
         fit=None,
         survival_by_direction={LONG: None, SHORT: None},
-        mtf_survival=None,
+        mtf_survival_by_direction={LONG: None, SHORT: None},
         tau_regime_minutes=None,
         tau_mtf_minutes=None,
         mtf_disagreement=None,
@@ -679,6 +743,9 @@ __all__ = [
     "DEFAULT_ITERATIONS",
     "DEFAULT_SEED",
     "DEFAULT_SEEDS",
+    "DIRECTION_FAV_UNDEFINED",
+    "DIRECTION_LOW_CONFIDENCE",
+    "DIRECTION_PASS",
     "GATE2_FAILED",
     "GATE2_PASSED",
     "GATE2_PER_PARAMETER",
@@ -705,5 +772,6 @@ __all__ = [
     "regime_features",
     "split_by_lengths",
     "survival",
+    "trusted_tau",
     "wilson_lower",
 ]

@@ -48,12 +48,15 @@ class TriggerSpec:
     kind: str
     reasons: Tuple[str, ...]
     description: str
+    #: Где проверяется: `BAR` — на каждом баре удержания, `ENTRY` — только при входе.
+    scope: str = "BAR"
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "trigger": self.name,
             "kind": self.kind,
             "reasons": list(self.reasons),
+            "scope": self.scope,
             "description": self.description,
         }
 
@@ -71,11 +74,13 @@ EXIT_TRIGGERS: Tuple[TriggerSpec, ...] = (
     TriggerSpec("model_invalid", KIND_HARD, ("MODEL_INVALID",),
                 "A_t ниже нижней полосы §8 — модель не описывает движение"),
     TriggerSpec("regime_breaker", KIND_HARD, ("REGIME_BREAKER",),
-                "CUSUM доходностей пробил порог — смена характера движения"),
+                "CUSUM квадратов центрированных доходностей пробил порог — смена дисперсии"),
     TriggerSpec("regime_confidence", KIND_HARD, ("REGIME_CONFIDENCE",),
-                "γ_t(fav) < 1−q — режиму нельзя доверять"),
+                "γ_t(fav) < 1−q — вход запрещён; γ из статичной матрицы, проверка при входе",
+                scope="ENTRY"),
     TriggerSpec("mtf_confirmation", KIND_REDUCTION, ("MTF_DISAGREEMENT",),
-                "состояния 10m и 15m расходятся — редукция τ_max / no-trade"),
+                "состояния 10m и 15m расходятся — редукция τ_max / no-trade",
+                scope="DIAGNOSTIC"),
     TriggerSpec("vol_spike", KIND_REDUCTION, ("VOL_SPIKE",),
                 "выброс range-based σ — пересчёт τ_max"),
     TriggerSpec("close_cost_drift", KIND_COST, ("CLOSE_COST_DRIFT",),

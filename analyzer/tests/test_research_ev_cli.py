@@ -154,6 +154,10 @@ def test_ev_writes_artifacts_and_registers_trial(paths):
     assert "tau_max:TEST@TQBR" not in protocol["flags"]
     assert (out / "tau-max.json").is_file()
     assert (out / "regime.json").is_file()
+    # Стресс издержек ×1.5 и доля train записаны в артефакты, а не только посчитаны (R2, m12).
+    assert star["payload"]["instruments"][0]["stress"]["multiplier"] == pytest.approx(1.5)
+    assert curve["payload"]["instruments"][0]["stress"]["multiplier"] == pytest.approx(1.5)
+    assert star["payload"]["instruments"][0]["split"]["train_share"] == pytest.approx(0.75)
 
     records = [
         json.loads(line)
@@ -163,6 +167,16 @@ def test_ev_writes_artifacts_and_registers_trial(paths):
     assert len(records) == 1
     assert records[0]["params"]["model"] == "ev_tau_star"
     assert records[0]["params"]["protocol"] == "SL_FIRST_EMPIRICAL_1M"
+    assert records[0]["params"]["train_share"] == pytest.approx(0.75)
+
+
+def test_ev_rejects_train_share_out_of_range(paths):
+    """Неверная доля train — код возврата ввода, а не traceback (m10)."""
+    data, theta_dir, out, registry = paths
+
+    assert main(_args(data, theta_dir, out, registry, "--train-share", "0.3")) == 2
+    assert main(_args(data, theta_dir, out, registry, "--train-share", "1.0")) == 2
+    assert not (out / "tau-star.json").exists()
 
 
 def test_ev_barriers_follow_policy_multipliers(paths):
@@ -297,6 +311,10 @@ def test_execute_writes_journal_and_marks_sample(paths):
         assert no_trade["payload"]["counts"]
     assert len(triggers["payload"]["triggers"]) == 11
     assert triggers["payload"]["reducing"] == ["mtf_confirmation", "vol_spike"]
+    specs = {spec["trigger"]: spec for spec in triggers["payload"]["triggers"]}
+    # Где проверяется триггер: гейт режима — при входе, расхождение 10m — диагностика (m7, R3).
+    assert specs["regime_confidence"]["scope"] == "ENTRY"
+    assert specs["mtf_confirmation"]["scope"] == "DIAGNOSTIC"
     assert (out / "execute.md").is_file()
     hold = json.loads((out / "hold-rule.json").read_text(encoding="utf-8"))
     assert hold["payload"]["lambda_risk"] == pytest.approx(2.0 / (2 * 2**0.5))

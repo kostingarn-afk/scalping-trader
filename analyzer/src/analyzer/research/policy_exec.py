@@ -172,7 +172,8 @@ class ExecutionResult:
     no_trades: Tuple[NoTrade, ...]
     exit_counts: Dict[str, int]
     no_trade_counts: Dict[str, int]
-    tau_max: int
+    #: `None` — горизонт не определён (`τ_edge` нет): это не «ноль минут».
+    tau_max: Optional[int]
     flags: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
@@ -222,7 +223,7 @@ def execute_policy(
             ),
             exit_counts={},
             no_trade_counts={NO_THETA: len(signals)} if signals else {},
-            tau_max=0,
+            tau_max=None,
             flags={"tau_max": "MISSING"},
         )
 
@@ -395,9 +396,6 @@ def _run_position(
             break
         if cusum_breaker(returns):
             exit_reason, exit_price, exit_index = "REGIME_BREAKER", float(close[index]), index
-            break
-        if not config.regime_gates.get(direction, True):
-            exit_reason, exit_price, exit_index = "REGIME_CONFIDENCE", float(close[index]), index
             break
         minutes_to_close = schedule.minutes_to_close(_moment(int(stamps[index])))
         if 0 <= minutes_to_close <= config.tau_liq + policy.buffer_minutes:

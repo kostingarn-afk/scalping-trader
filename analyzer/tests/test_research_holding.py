@@ -167,6 +167,31 @@ def test_remaining_moments_validate_inputs():
         remaining_moments([session], to_tp=1, to_sl=2, tau_rem=3, tick_value=1.0, stride=0)
 
 
+def test_remaining_moments_until_ts_excludes_future_paths():
+    """`until_ts` = оценка «как если бы ряд кончился на баре t»: без заглядывания вперёд (R5)."""
+    closes = [100.0 + (index % 3) for index in range(20)]
+    session = _arrays(closes)
+    cut = 10  # индекс бара t: путь целиком лежит до него
+
+    with_cut = remaining_moments(
+        [session], to_tp=4, to_sl=2, tau_rem=5, tick_value=1.0,
+        stride=1, min_paths=2, until_ts=int(session["ts"][cut]),
+    )
+    truncated = remaining_moments(
+        [_arrays(closes[:cut])], to_tp=4, to_sl=2, tau_rem=5, tick_value=1.0,
+        stride=1, min_paths=2,
+    )
+    without_cut = remaining_moments(
+        [session], to_tp=4, to_sl=2, tau_rem=5, tick_value=1.0, stride=1, min_paths=2
+    )
+
+    assert with_cut is not None and truncated is not None and without_cut is not None
+    # Индексы 0..4 (index + tau_rem < cut): 5 путей, а не 15 по всему ряду.
+    assert with_cut.paths == 5
+    assert without_cut.paths == 15
+    assert with_cut.to_dict() == truncated.to_dict()
+
+
 # --- правило удержания ----------------------------------------------------
 
 

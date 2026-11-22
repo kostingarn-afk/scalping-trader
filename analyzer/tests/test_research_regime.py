@@ -7,6 +7,7 @@ import pytest
 from analyzer.research.regime import (
     MTF_DISAGREEMENT_LIMIT,
     RegimeError,
+    Survival,
     aggregate_minutes,
     evaluate_regime,
     fit_hmm,
@@ -14,6 +15,7 @@ from analyzer.research.regime import (
     mtf_consistency,
     regime_features,
     survival,
+    trusted_tau,
     wilson_lower,
 )
 
@@ -215,8 +217,33 @@ def test_evaluate_regime_reports_gate2_and_survival():
     assert report.survival_by_direction[1] is not None
     assert report.mtf_disagreement is not None
     assert 0.0 <= report.mtf_disagreement <= 1.0
-    assert report.tau_regime_minutes is not None
-    assert report.tau_mtf_minutes is None or report.tau_mtf_minutes <= report.tau_regime_minutes
+    # Синтетика даёт γ ниже 1−q: измеренная низкая уверенность помечается, а горизонт
+    # направления в τ_regime не входит (R4) — иначе проваленный гейт обрезал бы доверенный.
+    assert "REGIME_CONFIDENCE" in report.gates["survival"]
+    assert report.tau_regime_minutes is None
+    assert report.tau_mtf_minutes is None
+
+
+def test_tau_regime_uses_only_directions_that_pass_gate():
+    def item(tau: int, passed: bool) -> Survival:
+        return Survival(
+            state=0,
+            gamma=0.99 if passed else 0.2,
+            p_lcb=0.9 if passed else 0.1,
+            transitions_from=100,
+            q=0.1,
+            tau_steps=tau,
+            tau_minutes=tau,
+            tau_minutes_alt=tau,
+            gate_passed=passed,
+        )
+
+    assert trusted_tau({1: item(180, True), -1: item(0, False)}) == 180
+    assert trusted_tau({1: item(180, True), -1: None}) == 180
+    assert trusted_tau({1: item(120, True), -1: item(180, True)}) == 120
+    # Доверенных направлений нет — горизонт не определён, а не ноль.
+    assert trusted_tau({1: None, -1: None}) is None
+    assert trusted_tau({1: item(0, False), -1: item(0, False)}) is None
 
 
 def test_evaluate_regime_marks_failure_on_short_history():

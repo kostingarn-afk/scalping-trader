@@ -18,6 +18,7 @@ from ..backtest.loader import HistoryDataset, scan_dir
 from .artifacts import build_artifact, collect_flags
 from .costs import CostError, CostEstimate, estimate_cost
 from .ev import (
+    COMPONENT_MISSING,
     COMPONENT_OK,
     COMPONENT_REFERENCE,
     entry_decision,
@@ -818,6 +819,10 @@ def _run_ev(
     if args.bootstrap < 20:
         print("ошибка ввода: --bootstrap должен быть не меньше 20", file=sys.stderr)
         return EXIT_INPUT
+    if not 0.5 <= args.train_share < 1.0:
+        # Проверка до цикла: иначе неверная доля даёт traceback из `_split_window` (m10).
+        print("ошибка ввода: --train-share должен быть в [0.5, 1)", file=sys.stderr)
+        return EXIT_INPUT
     if args.weeks != 0 and not 4 <= args.weeks <= 8:
         print(
             "ошибка ввода: --weeks допускает 0 (вся история) или 4–8 недель",
@@ -855,6 +860,7 @@ def _run_ev(
                 "policy_sources": policy_sources,
                 "taus": list(taus),
                 "bootstrap": args.bootstrap,
+                "train_share": args.train_share,
                 "schedule": schedule.name,
                 "protocol": "SL_FIRST_EMPIRICAL_1M",
             }
@@ -971,7 +977,14 @@ def _run_ev(
         tau_mtf = regime.tau_mtf_minutes if regime is not None else None
         regime_gates = regime.gate_passed if regime is not None else {1: True, -1: True}
         regime_status = (
-            COMPONENT_REFERENCE if tau_regime is None else COMPONENT_OK
+            COMPONENT_MISSING
+            if regime is None
+            else (COMPONENT_OK if tau_regime is not None else COMPONENT_REFERENCE)
+        )
+        regime_note = (
+            regime.reference_reason
+            if regime is not None and tau_regime is None
+            else None
         )
         try:
             tau_liq = _tau_liquidation(
@@ -1001,6 +1014,7 @@ def _run_ev(
             tau_regime=tau_regime,
             tau_mtf=tau_mtf,
             regime_status=regime_status,
+            regime_note=regime_note,
         )
         # τ_max из семи компонентов собран; неполный набор виден в complete и во флагах.
         decision = entry_decision(curve, selection, tau_max=tau_max.value or 0)
@@ -1175,7 +1189,9 @@ def _run_ev(
                     "theta_trial_id": theta_trial,
                     "policy": policy.to_mapping(),
                     "policy_sources": policy_sources,
-                    "split_policy": "single-window; train/OOS фиксирует R4",
+                    "split_policy": (
+                        "train/OOS по --train-share: τ* и HMM на train, исполнение на всём окне"
+                    ),
                     "skipped": skipped,
                     "instruments": [
                         {
@@ -1235,6 +1251,7 @@ def _run_ev(
                             "instrument": entry["instrument"],
                             "barriers": entry["barriers"],
                             "cost_ticks": entry["cost"]["round_trip_ticks"],  # type: ignore[index]
+                            "stress": entry["stress"],
                             "points": entry["points"],
                         }
                         for entry in entries
@@ -1270,6 +1287,7 @@ def _run_ev(
                             "entry": entry["entry"],
                             "tau_max": entry["tau_max"],
                             "split": entry["split"],
+                            "stress": entry["stress"],
                             "waiting_bars": entry["signals"]["waiting_bars"],  # type: ignore[index]
                         }
                         for entry in entries
@@ -1470,20 +1488,7 @@ def _write_execution_artifacts(
                     "alpha_total": policy.alpha_total,
                     "step_minutes": 1,
                     "per_instrument": [
-                        {
-                            "instrument": result.instrument,
-                            "tau_max": result.tau_max,
-                            **dict(
-                                zip(
-                                    ("n_checks", "alpha_check", "z_value"),
-                                    band_checks(
-                                        max(1, result.tau_max),
-                                        policy.alpha_total,
-                                    ),
-                                )
-                            ),
-                        }
-                        for result in executions
+                        _band_row(result, policy.alpha_total) for result in executions
                     ],
                     "note": "σ_P берётся точечной оценкой R2 (NO_SIGMA_CI)",
                 },
@@ -1674,6 +1679,28 @@ def _split_window(
     return train, cut_ts, split
 
 
+def _band_row(result: ExecutionResult, alpha_total: float) -> Dict[str, object]:
+    """Строка `online-band`: без определённого `τ_max` Бонферрони неприменима (m2)."""
+    if result.tau_max is None:
+        return {
+            "instrument": result.instrument,
+            "tau_max": None,
+            "n_checks": None,
+            "alpha_check": None,
+            "z_value": None,
+            "status": "NO_TAU_MAX",
+        }
+    checks, alpha_check, z_value = band_checks(result.tau_max, alpha_total)
+    return {
+        "instrument": result.instrument,
+        "tau_max": result.tau_max,
+        "n_checks": checks,
+        "alpha_check": alpha_check,
+        "z_value": z_value,
+        "status": "OK",
+    }
+
+
 def _stress_payload(
     curve, selection, cost_ticks: float, multiplier: float = 1.5
 ) -> Dict[str, object]:
@@ -1800,11 +1827,15 @@ def _format_ev(
                 continue
             hmm = regime.get("hmm") or {}
             survival_payload = regime.get("survival") or {}
+            long_s = survival_payload.get("long") or {}
+            short_s = survival_payload.get("short") or {}
             lines.append(
                 f"- **{entry['instrument']}**: Gate 2 — {hmm.get('gate2', '—')} "
-                f"({hmm.get('transition_counts', '—')} переходов при пороге "
-                f"{hmm.get('gate2_threshold', '—')}); γ = {_fmt(survival_payload.get('gamma'))}, "
-                f"P_LCB = {_fmt(survival_payload.get('p_lcb'))}, "
+                f"({hmm.get('transitions', '—')} смен при пороге "
+                f"{hmm.get('gate2_threshold', '—')}); "
+                f"γ long = {_fmt(long_s.get('gamma'))}, short = {_fmt(short_s.get('gamma'))}; "
+                f"τ_regime = {_fmt(regime.get('tau_regime_minutes'))}, "
+                f"τ_mtf = {_fmt(regime.get('tau_mtf_minutes'))}, "
                 f"расхождение 10m = {_fmt(regime.get('mtf_disagreement'))}"
             )
         lines.append("")
