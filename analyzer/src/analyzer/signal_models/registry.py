@@ -24,6 +24,7 @@ from .builtin import (
 )
 from .ou import OuConfig, OuMeanReversionModel, ou_config
 from .microstructure import MicroConfig, MicrostructureModel, microstructure_config
+from .regime import HmmConfig, HmmRegimeModel, hmm_config
 
 
 class UnknownModelError(KeyError):
@@ -86,6 +87,16 @@ MODEL_SPECS: Mapping[str, ModelSpec] = MappingProxyType(
                 config=MicroConfig() if config is None else config
             ),
             make_config=microstructure_config,
+            label=config_label,
+        ),
+        "hmm": ModelSpec(
+            name="hmm",
+            version=HmmRegimeModel.version,
+            config_cls=HmmConfig,
+            factory=lambda config: HmmRegimeModel(
+                config=HmmConfig() if config is None else config
+            ),
+            make_config=hmm_config,
             label=config_label,
         ),
     }

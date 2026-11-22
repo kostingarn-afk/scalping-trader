@@ -16,6 +16,18 @@ from ..indicators import Indicators
 from ..strategy import Signal
 
 
+def as_int_param(prefix: str, name: str, value: Any) -> int:
+    """Привести параметр запуска к int; дробное или нечисловое значение — ошибка.
+
+    Тихий `int()` скрыл бы опечатку (`window=240.5`), поэтому проверка явная.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{prefix}: {name} must be an integer, got {value!r}")
+    if float(value) != int(value):
+        raise ValueError(f"{prefix}: {name} must be an integer, got {value!r}")
+    return int(value)
+
+
 @runtime_checkable
 class BarLike(Protocol):
     """Минимальный бар для оценки параметров; `backtest.models.Bar` подходит структурно."""

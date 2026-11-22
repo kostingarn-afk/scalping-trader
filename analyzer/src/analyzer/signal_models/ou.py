@@ -18,6 +18,7 @@ import numpy as np
 
 from ..indicators import Indicators
 from ..strategy import Signal, SignalType
+from .base import as_int_param
 
 _VERSION = "1.0"
 # Параметры запуска, которые принимает `--model-param key=value`.
@@ -210,14 +211,6 @@ def _confidence(excess: float, scale: float) -> float:
     return min(1.0, 0.5 + 0.5 * (max(excess, 0.0) / scale))
 
 
-def _as_int(name: str, value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"ou: {name} must be an integer, got {value!r}")
-    if float(value) != int(value):
-        raise ValueError(f"ou: {name} must be an integer, got {value!r}")
-    return int(value)
-
-
 def ou_config(options: Any) -> OuConfig:
     """Конфиг из флагов запуска: `--z-entry` и `--model-param key=value`."""
     raw = dict(getattr(options, "model_params", {}) or {})
@@ -228,8 +221,8 @@ def ou_config(options: Any) -> OuConfig:
         )
     defaults = OuConfig()
     return OuConfig(
-        window=_as_int("window", raw.get("window", defaults.window)),
-        min_bars=_as_int("min_bars", raw.get("min_bars", defaults.min_bars)),
+        window=as_int_param("ou", "window", raw.get("window", defaults.window)),
+        min_bars=as_int_param("ou", "min_bars", raw.get("min_bars", defaults.min_bars)),
         z_entry=float(options.z_entry),
         max_half_life_bars=float(
             raw.get("max_half_life_bars", defaults.max_half_life_bars)

@@ -181,6 +181,7 @@ read-model из БД. UI не пишет в БД напрямую и не зна
 | Вызов `RecoveryService.recover()` со сверкой с БД, загрузка позиций на старте | шаг 3.1 | — |
 | `candle_interval` в `analysis_results` — константа `"1min"` (`main.py:71`) при любом интервале Collector | шаг 3.1 | при смене на 5/15 данные помечаются неверно |
 | `commission_rate_per_side = 0.003` («Инвестор») в `config.py:26` и сиде `V4` вместо `0.0005` | шаг 1.9 (правка конфига + миграция `V8`, сид не трогать) | порог 1.8 % вместо 0.30 % — все минутные сигналы отсекаются |
+| Перегенерация `poetry.lock` | после 1.4 | lock устарел: нет `pandas`/`statsmodels`/`scikit-learn` и `hmmlearn`, `TA-Lib` в pyproject исправлен на `^0.8.3`; `poetry lock` в WSL пересоздаёт `analyzer/.venv`, запускать с отключённым project-venv |
 | Подключение `PnlCircuitBreaker` | 3.3 — автоматический stop | — |
 | Замер `max_open_positions = 3` при 5 инструментах | после 3.2 (видно в UI) | — |
 | `correlation_threshold` 0.6 вместо 0.8 | решение владельца | — |

@@ -113,9 +113,23 @@ Mean reversion на процессе Орнштейна–Уленбека (`doc
 **В бэктесте модель всегда HOLD:** CSV-выгрузка Collector содержит только свечи, стакана в
 истории нет. Проверка — unit-тесты на индикаторах и production-путь после запуска Collector.
 
-**Боевой Analyzer работает на `mean_reversion`.** `v2`, `momentum`, `ou` и `microstructure`
-подключены только к `analyzer-backtest` или к production-индикаторам; включение модели в живой
-контур — отдельный шаг после подтверждения преимущества (docstring модулей).
+### `hmm` (`signal_models/regime.py`) — только бэктест
+
+Режим рынка — Gaussian HMM с `states=2` на логе абсолютных доходностей окна
+(лог-волатильность). «Спокойное» состояние — с наименьшим средним (`argmin(means_)`); вход
+mean reversion (z-score + RSI) разрешён только в нём, в волатильном — HOLD.
+
+- переобучение не чаще `refit_bars` (30) баров, текущее состояние пересчитывается каждый бар;
+- параметры: `--model-param window=240`, `min_bars=60`, `states=2`, `refit_bars=30`,
+  `n_iter=100`, `seed=7`; порог `--z-entry`, RSI — `--rsi-buy/--rsi-sell`;
+- инициализация — по квантилям признака: kmeans-инициализация `hmmlearn` на скошенном
+  распределении сходится в вырожденное решение (оба состояния описывают волатильный режим);
+- `hmmlearn` импортируется лениво: без него реестр и остальные модели работают, а `--strategy
+  hmm` падает с понятной ошибкой.
+
+**Боевой Analyzer работает на `mean_reversion`.** `v2`, `momentum`, `ou`, `microstructure` и
+`hmm` подключены только к `analyzer-backtest`; включение модели в живой контур — отдельный шаг
+после подтверждения преимущества (docstring модулей).
 
 ### Реестр моделей (`signal_models/`)
 
@@ -327,7 +341,7 @@ Train фиксированной длины, test — следующий бло�
 | `--max-notional-pct` | `100.0` | лимит номинала позиции, % депозита |
 | `--atr-sl` / `--atr-tp` | `1.5` / `2.0` | множители ATR для SL и TP |
 | `--tp-sl` | `` | перебор пар `TP:SL` (`2:1.5,3:2`), метка `tp3/sl2` |
-| `--strategy` | `mean_reversion` | `mean_reversion` / `v2` / `momentum` / `ou` / `microstructure` (из реестра `signal_models`) |
+| `--strategy` | `mean_reversion` | `mean_reversion` / `v2` / `momentum` / `ou` / `microstructure` / `hmm` (из реестра `signal_models`) |
 | `--model-param` | — | параметры модели `key=value`, повторяемый (например `window=240` для `ou`) |
 | `--z-entry` | `2.0` | порог `\|z\|` в σ BB (v2, momentum) |
 | `--rsi-buy` / `--rsi-sell` | — | v2: 25/75, momentum: 65/35 (перекрывают дефолты стратегии) |

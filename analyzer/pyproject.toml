@@ -9,7 +9,7 @@ packages = [{include = "analyzer", from = "src"}]
 python = "^3.11"
 numpy = "^1.26"
 scipy = "^1.13"
-TA-Lib = "^0.8.32"
+TA-Lib = "^0.8.3"
 kafka-python = "^2.0"
 asyncpg = "^0.29"
 prometheus-client = "^0.20"
@@ -23,6 +23,8 @@ uvloop = {version = "^0.19", markers = "sys_platform != 'win32'"}
 pandas = "^2.2"
 statsmodels = "^0.14"
 scikit-learn = "^1.4"
+# Шаг 1.4: переключение режимов HMM вместо ADX-эвристики (разрешение владельца 2026-11-21).
+hmmlearn = "^0.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2"
