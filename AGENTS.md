@@ -179,8 +179,8 @@ Flyway-миграции применяет Trader при старте; Kafka-т�
 # change заархивирован 2026-11-11; команды ниже — для новых изменений
 openspec status --change <change-id> --json
 openspec instructions apply --change <change-id> --json
-openspec validate --change <change-id>
-openspec archive --change <change-id>          # после ревью
+openspec validate <change-id>                   # в CLI 2.0.0 опции --change нет: имя позиционное
+openspec archive <change-id>                    # после ревью; --yes для неинтерактивного режима
 ```
 
 ## 6. Testing
@@ -240,5 +240,5 @@ openspec archive --change <change-id>          # после ревью
 
 - Перед изменением кода читай `openspec/changes/archive/2026-11-11-scalping-trading-system-mvp/design.md` — там обоснование решений.
 - Новые изменения оформляй отдельным change в `openspec/changes/`; правки требований → `specs/`, правки задач → `tasks.md` — через `/opsx-continue` или вручную.
-- После реализации — `openspec validate --change <change-id>`, затем `/opsx-archive`.
+- После реализации — `openspec validate <change-id>`, затем `/opsx-archive`.
 - `brief.md` (контекст изменения) — не создавался; заведение — отдельная задача.

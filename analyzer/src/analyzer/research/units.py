@@ -17,10 +17,11 @@ RATIO = "ratio"
 MINUTES = "minutes"
 COUNT = "count"
 BPS = "bps"
+LOG_PRICE = "log_price"
 
 #: Закрытый список: свободный текст не ловит опечатку (`tick` вместо `ticks`).
 ALLOWED_UNITS: frozenset[str] = frozenset(
-    {TICKS, MINUTE_INVERSE, PCT, RUB, RATIO, MINUTES, COUNT, BPS}
+    {TICKS, MINUTE_INVERSE, PCT, RUB, RATIO, MINUTES, COUNT, BPS, LOG_PRICE}
 )
 
 #: Единицы по умолчанию для типовых величин исследования.
@@ -179,6 +180,7 @@ __all__ = [
     "BPS",
     "COUNT",
     "EXPECTED_UNITS",
+    "LOG_PRICE",
     "MINUTES",
     "MINUTE_INVERSE",
     "PCT",

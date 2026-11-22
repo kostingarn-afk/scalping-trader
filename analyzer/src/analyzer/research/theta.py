@@ -53,6 +53,18 @@ AGREEMENT_HIGH = 1.5
 #: `LOW_CONFIDENCE` (`PROJECT-DECISION:theta-band-margin`).
 BAND_MARGIN = 1.25
 BAND_PERCENTILE = 97.5
+#: Уровень двустороннего bootstrap-CI. Отдельно от перцентиля полосы: это разные семантики,
+#: и одна константа не должна молча менять обе.
+CI_PERCENTILE = 95.0
+#: Нижняя граница сетки поиска θ для дисперсионной модели. Достижение границы означает
+#: «возврат не идентифицируется», а не «θ = 1e-5».
+VARIANCE_THETA_FLOOR = 1e-5
+#: Порог, ниже которого θ на базовой сетке Δ считается неидентифицируемой и требуется
+#: эскалация сетки до 60 минут (решение владельца 2026-11-22).
+ESCALATION_THETA = 0.02
+#: Во сколько раз σ из дисперсионной модели может отличаться от наивной оценки, прежде чем
+#: расхождение помечается флагом.
+SIGMA_AGREEMENT = 1.25
 
 REG = "REGRESSION"
 PLATEAU = "PLATEAU"
@@ -103,12 +115,19 @@ class VariancePoint:
 
 @dataclass(frozen=True)
 class VarianceFit:
-    """Дисперсионная оценка θ: `Var(x_{t+Δ} − x_t) = (σ²/θ)(1 − e^{−θΔ}) + 2ω²`."""
+    """Дисперсионная оценка θ: `Var(x_{t+Δ} − x_t) = (σ²/θ)(1 − e^{−θΔ}) + 2ω²`.
+
+    `two_omega_sq` — свободный член модели, то есть именно `2ω²`, а не `ω²`: имя хранит
+    множитель, чтобы при переносе в R3 значение не было использовано вдвое больше.
+    `identified` = False означает, что минимум лежит на нижней границе сетки θ: данные
+    не отличают возврат от блуждания, и значение θ — предел перебора, а не оценка.
+    """
 
     theta: float
     amplitude: float
-    noise_variance: float
+    two_omega_sq: float
     points: Tuple[VariancePoint, ...]
+    identified: bool = True
 
     @property
     def sigma_sq(self) -> float:
@@ -116,42 +135,57 @@ class VarianceFit:
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "theta": round(self.theta, 6),
+            "theta": round(self.theta, 8),
             "sigma_sq": round(self.sigma_sq, 12),
-            "noise_variance": round(self.noise_variance, 12),
+            "two_omega_sq": round(self.two_omega_sq, 12),
+            "identified": self.identified,
             "points": [point.to_dict() for point in self.points],
         }
 
 
 @dataclass(frozen=True)
 class NullBand:
-    """Распределение оценок θ на случайном блуждании с той же геометрией окон."""
+    """Распределение оценок θ на случайном блуждании с той же геометрией окон.
 
-    acf_intercept: Tuple[float, float]
-    acf_plateau: Tuple[float, float]
-    variance: Tuple[float, float]
+    Границы — пара `(2.5, 97.5)` перцентилей. `None` вместо пары означает, что реплики
+    не дали ни одной оценки этого вида: это «полосы нет», а не «полоса равна нулю» —
+    различие принципиально, иначе критерий Gate 1 проходит без проверки.
+    """
+
+    acf_intercept: Optional[Tuple[float, float]]
+    acf_plateau: Optional[Tuple[float, float]]
+    variance: Optional[Tuple[float, float]]
     replications: int
     sessions: int
 
-    def acf_upper(self, method: str) -> float:
-        return self.acf_plateau[1] if method == PLATEAU else self.acf_intercept[1]
+    def acf_upper(self, method: str) -> Optional[float]:
+        bounds = self.acf_plateau if method == PLATEAU else self.acf_intercept
+        return None if bounds is None else bounds[1]
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "acf_intercept": [round(value, 6) for value in self.acf_intercept],
-            "acf_plateau": [round(value, 6) for value in self.acf_plateau],
-            "variance": [round(value, 6) for value in self.variance],
+            "acf_intercept": _bounds_to_dict(self.acf_intercept),
+            "acf_plateau": _bounds_to_dict(self.acf_plateau),
+            "variance": _bounds_to_dict(self.variance),
             "replications": self.replications,
             "sessions": self.sessions,
             "percentile": BAND_PERCENTILE,
         }
 
 
+def _bounds_to_dict(bounds: Optional[Tuple[float, float]]) -> Optional[List[float]]:
+    if bounds is None:
+        return None
+    return [round(value, 6) for value in bounds]
+
+
 @dataclass(frozen=True)
 class ThetaFit:
     """Результат идентификации θ.
 
-    `theta` — оценка ACF-регрессией (спека), `intercept_ci` — её CI. Дисперсионная оценка
+    `theta` — точечная оценка, выбранная по `method`: интерсепт регрессии (`REGRESSION`)
+    или медиана хвоста `θ̂(Δ)` при неотличимом от нуля наклоне (`PLATEAU`). `intercept_ci` —
+    CI именно выбранной оценки (для `PLATEAU` — CI значений плато). Дисперсионная оценка
     лежит в `variance` и используется как уточняющая (`theta_used`).
     """
 
@@ -220,6 +254,14 @@ class ThetaFit:
 
 @dataclass(frozen=True)
 class OuFit:
+    """OU-параметры инструмента.
+
+    `sigma` — диффузионный коэффициент из дисперсионной модели (`σ² = A·θ`), то есть без
+    микроструктурного шума: именно он входит в `σ_P = √(A/2)`. `sigma_naive` — СКО
+    десезонных минутных доходностей (включает шум и проходы через пропуски) и служит
+    диагностикой: расхождение больше `SIGMA_AGREEMENT` помечается флагом.
+    """
+
     instrument: str
     theta: ThetaFit
     sigma: float
@@ -228,22 +270,26 @@ class OuFit:
     attenuation: float
     rho_model: Dict[int, float]
     registry_id: str = ""
+    sigma_naive: Optional[float] = None
+    flags: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "instrument": self.instrument,
             "theta_acf": round(self.theta.theta, 6),
             "theta_variance": (
-                None if self.theta.variance is None else round(self.theta.variance.theta, 6)
+                None if self.theta.variance is None else round(self.theta.variance.theta, 8)
             ),
             "theta_used": round(self.theta.theta_used, 6),
             "theta": self.theta.to_dict(),
             "sigma": round(self.sigma, 8),
+            "sigma_naive": None if self.sigma_naive is None else round(self.sigma_naive, 8),
             "sigma_p": round(self.sigma_p, 8),
             "mu": round(self.mu, 8),
             "attenuation": round(self.attenuation, 6),
             "rho_model": {str(tau): round(value, 6) for tau, value in self.rho_model.items()},
             "registry_id": self.registry_id,
+            "flags": dict(self.flags),
         }
 
 
@@ -276,7 +322,9 @@ def evaluate_gate1(
         return tuple(reasons), flags
 
     upper = band.acf_upper(method)
-    if theta <= upper:
+    if upper is None:
+        reasons.append(f"нулевая полоса для метода {method} не построена")
+    elif theta <= upper:
         reasons.append(
             f"ACF-оценка θ={theta:.6f} не выше полосы случайного блуждания {upper:.6f}"
         )
@@ -285,15 +333,27 @@ def evaluate_gate1(
         reasons.append("дисперсионная оценка не построена")
         return tuple(reasons), flags
 
-    if variance.theta <= band.variance[1]:
+    if not variance.identified:
+        reasons.append(
+            "дисперсионная θ не идентифицирована: минимум на границе сетки θ"
+        )
+        flags["variance_theta"] = (
+            "UNIDENTIFIED: данные не отличают возврат от блуждания"
+        )
+        return tuple(reasons), flags
+
+    var_upper = None if band.variance is None else band.variance[1]
+    if var_upper is None:
+        reasons.append("нулевая полоса для дисперсионной оценки не построена")
+    elif variance.theta <= var_upper:
         reasons.append(
             f"дисперсионная θ={variance.theta:.6f} не выше полосы блуждания "
-            f"{band.variance[1]:.6f}"
+            f"{var_upper:.6f}"
         )
-    elif variance.theta < band.variance[1] * BAND_MARGIN:
+    elif variance.theta < var_upper * BAND_MARGIN:
         flags["variance_margin"] = (
             f"LOW_CONFIDENCE: дисперсионная θ всего в "
-            f"{variance.theta / band.variance[1]:.2f}× над полосой блуждания"
+            f"{variance.theta / var_upper:.2f}× над полосой блуждания"
         )
 
     # Расхождение оценок — диагностика, а не блокер: ACF по спеке смещена вверх (удаление
@@ -320,6 +380,9 @@ def estimate_theta(
     """Оценить θ двумя способами, построить нулевую полосу и вынести вердикт Gate 1."""
     if not deltas or any(delta < 1 for delta in deltas):
         raise ThetaError("deltas must be positive integers")
+    # Дубли Δ дали бы дубли точек и двойной вес этого шага в МНК: сетка нормализуется,
+    # а не «как передали».
+    deltas = tuple(sorted(set(deltas)))
     if bootstrap < 20:
         raise ThetaError("bootstrap must be at least 20 resamples")
     if null_reps < 50:
@@ -380,7 +443,9 @@ def estimate_theta(
         if b_plateau is not None:
             plateaus.append(b_plateau)
 
-    slope_ci = _percentile(slopes, slope)
+    slope_ci = _percentile(slopes, CI_PERCENTILE)
+    if slope_ci is None:  # pragma: no cover - intercepts/slopes наполняются в одной итерации
+        slope_ci = (slope, slope)
     flags: Dict[str, str] = {}
     if not intercepts:
         return ThetaFit(
@@ -399,18 +464,15 @@ def estimate_theta(
     if len(intercepts) < 20:
         flags["bootstrap"] = f"LOW_CONFIDENCE: {len(intercepts)} ресамплов"
 
-    # Плато — fallback на случай, когда шумовая поправка не идентифицируется: наклон
-    # зависимости θ̂(1/Δ) статистически неотличим от нуля, а хвост θ̂(Δ) устойчив.
-    plateau = _plateau_value(points)
-    if plateau is not None and plateaus and slope_ci[0] <= 0.0 <= slope_ci[1]:
-        theta = plateau
-        method = PLATEAU
-        theta_ci = _percentile(plateaus, plateau)
+    theta, method, theta_ci = _select_estimate(
+        points=points,
+        slope_ci=slope_ci,
+        intercept=intercept,
+        intercepts=intercepts,
+        plateaus=plateaus,
+    )
+    if method == PLATEAU:
         flags["method"] = "PLATEAU: наклон неотличим от нуля"
-    else:
-        theta = intercept
-        method = REG
-        theta_ci = _percentile(intercepts, intercept)
 
     probe = ThetaFit(
         theta=theta,
@@ -456,8 +518,15 @@ def fit_ou(
     theta: ThetaFit,
     *,
     taus: Sequence[int] = (1, 5, 10, 30),
+    registry_id: str = "",
 ) -> OuFit:
-    """σ, σ_P, μ, attenuation и диагностический ρ_model."""
+    """σ, σ_P, μ, attenuation и диагностический ρ_model.
+
+    σ берётся из дисперсионной модели (`σ² = A·θ`), а не из СКО доходностей: СКО включает
+    микроструктурный шум и проходы через пропуски минут, из-за чего σ_P завышается на
+    десятки процентов относительно модели, на которой построен EV. Наивная оценка остаётся
+    в артефакте как диагностика.
+    """
     effective = theta.theta_used
     if effective <= 0:
         raise ThetaError("theta must be positive for OU parameters")
@@ -471,16 +540,33 @@ def fit_ou(
         raise ThetaError(f"cannot deseasonalize returns: {exc}") from exc
     if len(deseason.returns) < 2:
         raise ThetaError("not enough returns for sigma")
-    sigma_sq = float(np.var(np.asarray(deseason.returns, dtype=float), ddof=1))
-    if sigma_sq <= 0:
+    naive_sq = float(np.var(np.asarray(deseason.returns, dtype=float), ddof=1))
+    if naive_sq <= 0:
         raise ThetaError("sigma is zero: series is flat")
-    sigma = sqrt(sigma_sq)
+    sigma_naive = sqrt(naive_sq)
+
+    flags: Dict[str, str] = {}
+    if theta.variance is not None and theta.variance.sigma_sq > 0:
+        sigma = sqrt(theta.variance.sigma_sq)
+        if not 1.0 / SIGMA_AGREEMENT <= sigma / sigma_naive <= SIGMA_AGREEMENT:
+            flags["sigma"] = (
+                f"LOW_CONFIDENCE: σ модели {sigma:.6g} против наивной {sigma_naive:.6g} "
+                f"({sigma / sigma_naive:.2f}×) — расхождение объясняется шумом и пропусками"
+            )
+    else:
+        sigma = sigma_naive
+        flags["sigma"] = "UNVERIFIED: σ из доходностей, дисперсионная модель не построена"
+
     sigma_p = sigma / sqrt(2.0 * effective)
     prices = [bar.close for bar in bars if schedule.is_open(bar.ts)]
     if not prices:
         raise ThetaError("no in-session prices for anchor")
     mu = float(np.mean(np.log(np.asarray(prices, dtype=float))))
     attenuation = 1.0 / (1.0 + max(theta.noise_ratio, 0.0))
+    if theta.slope_ci[0] <= 0.0 <= theta.slope_ci[1]:
+        flags["attenuation"] = (
+            "CONSERVATIVE: CI наклона содержит 0, шумовая поправка не идентифицирована"
+        )
     rho_model = {tau: -sqrt((1.0 - e ** (-effective * tau)) / 2.0) for tau in taus}
     return OuFit(
         instrument=instrument,
@@ -490,14 +576,18 @@ def fit_ou(
         mu=mu,
         attenuation=attenuation,
         rho_model=rho_model,
+        registry_id=registry_id,
+        sigma_naive=sigma_naive,
+        flags=flags,
     )
 
 
-def aggregate_verdict(fits: Iterable[ThetaFit]) -> str:
-    results = list(fits)
+def aggregate_verdict(verdicts: Iterable[str]) -> str:
+    """Агрегат по инструментам: `PASS`, если прошёл хотя бы один."""
+    results = list(verdicts)
     if not results:
         raise ThetaError("no instruments to evaluate")
-    return PASS if any(fit.gate1_passed for fit in results) else UNDEFINED
+    return PASS if any(verdict == PASS for verdict in results) else UNDEFINED
 
 
 def _session_series(
@@ -632,33 +722,40 @@ def _variance_fit(
     if float(y.max()) <= 0:
         return None
 
-    theta, amplitude, noise = _profile_fit(x, y)
+    theta, amplitude, noise, identified = _profile_fit(x, y)
     if theta is None:
         return None
     return VarianceFit(
         theta=theta,
         amplitude=amplitude,
-        noise_variance=noise,
+        two_omega_sq=noise,
         points=tuple(
             VariancePoint(delta, sums[delta] / counts[delta], counts[delta]) for delta in usable
         ),
+        identified=identified,
     )
 
 
 def _profile_fit(
     x: np.ndarray, y: np.ndarray
-) -> Tuple[Optional[float], float, float]:
-    """Поиск θ по сетке с уточнением; (`None`, 0, 0), если МНК не даёт положительных A."""
-    best = _grid_search(x, y, 1e-5, 2.0, 240)
+) -> Tuple[Optional[float], float, float, bool]:
+    """Поиск θ по сетке с уточнением.
+
+    Возвращает `(None, 0, 0, False)`, если МНК не даёт положительных `A`. Четвёртый элемент —
+    `identified`: на блуждании `v(Δ) ∝ Δ`, профиль вырожден (идентифицируется только `A·θ`),
+    минимум лежит на нижней границе сетки, и θ — предел перебора, а не оценка.
+    """
+    best = _grid_search(x, y, VARIANCE_THETA_FLOOR, 2.0, 240)
     if best is None:
-        return (None, 0.0, 0.0)
+        return (None, 0.0, 0.0, False)
     _, theta, _ = best
-    low, high = theta / 1.6, theta * 1.6
+    low, high = max(theta / 1.6, VARIANCE_THETA_FLOOR), theta * 1.6
     refined = _grid_search(x, y, low, min(high, 2.0), 60)
     if refined is not None and refined[0] <= best[0]:
         best = refined
     _, theta, (amplitude, noise) = best
-    return (float(theta), float(amplitude), float(noise))
+    identified = theta > VARIANCE_THETA_FLOOR * 1.01
+    return (float(theta), float(amplitude), float(noise), identified)
 
 
 def _grid_search(
@@ -732,9 +829,9 @@ def _null_band_cached(
             variance_thetas.append(fit.theta)
 
     return NullBand(
-        acf_intercept=_percentile(intercepts, 0.0),
-        acf_plateau=_percentile(plateaus, 0.0),
-        variance=_percentile(variance_thetas, 0.0),
+        acf_intercept=_percentile(intercepts, BAND_PERCENTILE),
+        acf_plateau=_percentile(plateaus, BAND_PERCENTILE),
+        variance=_percentile(variance_thetas, BAND_PERCENTILE),
         replications=reps,
         sessions=sessions,
     )
@@ -804,10 +901,39 @@ def _plateau_value(points: Sequence[ThetaPoint]) -> Optional[float]:
     return float(np.median(tail))
 
 
-def _percentile(values: Sequence[float], fallback: float) -> Tuple[float, float]:
+def _select_estimate(
+    *,
+    points: Sequence[ThetaPoint],
+    slope_ci: Tuple[float, float],
+    intercept: float,
+    intercepts: Sequence[float],
+    plateaus: Sequence[float],
+) -> Tuple[float, str, Tuple[float, float]]:
+    """Выбрать точечную оценку и её CI: плато при неотличимом от нуля наклоне, иначе интерсепт.
+
+    Чистая функция: ветка `PLATEAU` тестируется на построенных точках, а не только через
+    полный прогон (на реальных данных наклон значим, и ветка иначе осталась бы мёртвой).
+    """
+    plateau = _plateau_value(points)
+    if plateau is not None and plateaus and slope_ci[0] <= 0.0 <= slope_ci[1]:
+        bounds = _percentile(plateaus, CI_PERCENTILE)
+        return plateau, PLATEAU, bounds if bounds is not None else (plateau, plateau)
+    bounds = _percentile(intercepts, CI_PERCENTILE)
+    return intercept, REG, bounds if bounds is not None else (intercept, intercept)
+
+
+def _percentile(
+    values: Sequence[float], percentile: float
+) -> Optional[Tuple[float, float]]:
+    """Двусторонний интервал уровня `percentile`; `None`, если реплик нет.
+
+    `None` — не «нулевая полоса»: пустой набор значений означает «интервал не построен»,
+    и вызывающая сторона обязана это обработать, а не сравнить оценку с нулём.
+    """
     if not values:
-        return (fallback, fallback)
-    low, high = np.percentile(np.asarray(values, dtype=float), [50.0 - (BAND_PERCENTILE - 50.0), BAND_PERCENTILE])
+        return None
+    tail = (100.0 - percentile) / 2.0
+    low, high = np.percentile(np.asarray(values, dtype=float), [tail, 100.0 - tail])
     return (float(low), float(high))
 
 
@@ -817,6 +943,7 @@ __all__ = [
     "DEFAULT_NULL_REPS",
     "DEFAULT_SEED",
     "ESCALATED_DELTAS",
+    "ESCALATION_THETA",
     "MIN_PAIRS",
     "NO_DATA",
     "OK",

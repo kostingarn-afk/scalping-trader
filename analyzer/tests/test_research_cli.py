@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from analyzer.research.cli import build_parser, main
@@ -203,7 +205,7 @@ def test_theta_rejects_short_null_reps(data_dir: Path, tmp_path: Path):
 
 
 def test_theta_writes_artifacts_even_when_gate_fails(data_dir: Path, tmp_path: Path):
-    """40 баров — мало для регрессии: Gate 1 не пройден, но артефакт обязан быть записан."""
+    """40 баров — мало для регрессии: Gate 1 не пройден, но артефакты обязаны быть записаны."""
     out = tmp_path / "out"
 
     code = main(
@@ -223,13 +225,131 @@ def test_theta_writes_artifacts_even_when_gate_fails(data_dir: Path, tmp_path: P
     )
 
     assert code == 1
-    payload = json.loads((out / "theta.json").read_text(encoding="utf-8"))
+    for name in ("theta-invariance.json", "signature-plot.json", "null-band.json", "ou-fit.json"):
+        assert (out / name).exists(), name
+    payload = json.loads((out / "theta-invariance.json").read_text(encoding="utf-8"))
     assert payload["name"] == "theta_invariance_regression"
+    assert payload["units"]["theta"] == "min^-1"
     assert payload["payload"]["gate1"] == "THETA_UNDEFINED"
     entry = payload["payload"]["instruments"][0]
     assert entry["gate1"] == "THETA_UNDEFINED"
     assert entry["gate1_reasons"]
-    assert entry["ou_fit"] is None
+    assert payload["payload"]["estimation_weeks"] == 8
+    assert entry["estimation_window"]["mode"] == "trailing-weeks"
     assert "Gate 1" in (out / "theta.md").read_text(encoding="utf-8")
     records = (tmp_path / "registry.jsonl").read_text(encoding="utf-8").splitlines()
-    assert json.loads(records[-1])["params"]["model"] == "gate1"
+    params = json.loads(records[-1])["params"]
+    assert params["model"] == "gate1"
+    assert params["estimation_weeks"] == 8
+
+
+def _write_ou_dataset(directory: Path, sessions: int = 30, minutes: int = 400) -> None:
+    """Многосессионная OU-серия, на которой Gate 1 проходит."""
+    rng = np.random.default_rng(3)
+    theta, sigma = 0.05, 0.002
+    rows = []
+    day = datetime(2026, 9, 1, tzinfo=timezone(timedelta(hours=3)))
+    built = 0
+    while built < sessions:
+        while day.weekday() >= 5:
+            day += timedelta(days=1)
+        level = 0.0
+        for minute in range(minutes):
+            level += -theta * level + sigma * rng.normal()
+            price = 100.0 * float(np.exp(level))
+            stamp = (day.replace(hour=10) + timedelta(minutes=1 + minute)).astimezone(
+                timezone.utc
+            )
+            rows.append(
+                f"{stamp.strftime('%Y-%m-%dT%H:%M:%SZ')},{price:.4f},{price * 1.0001:.4f},"
+                f"{price * 0.9999:.4f},{price:.4f},100"
+            )
+        day += timedelta(days=1)
+        built += 1
+    (directory / "TEST_1min.csv").write_text(
+        "\n".join([HEADER, *rows]) + "\n", encoding="utf-8"
+    )
+    (directory / "TEST_1min.meta.json").write_text(
+        json.dumps(dict(META, ticker="TEST")), encoding="utf-8"
+    )
+
+
+def test_theta_end_to_end_passes_and_records_trial_id(tmp_path: Path):
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_ou_dataset(data)
+    out = tmp_path / "out"
+
+    code = main(
+        [
+            "theta",
+            "--data-dir",
+            str(data),
+            "--out",
+            str(out),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--bootstrap",
+            "20",
+            "--null-reps",
+            "50",
+            "--weeks",
+            "0",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads((out / "theta-invariance.json").read_text(encoding="utf-8"))
+    assert payload["payload"]["gate1"] == "PASS"
+    trial_id = payload["payload"]["trial_id"]
+    ou = json.loads((out / "ou-fit.json").read_text(encoding="utf-8"))
+    assert ou["payload"]["instruments"], "ou_fit должен содержать прошедший инструмент"
+    fitted = ou["payload"]["instruments"][0]
+    assert fitted["registry_id"] == trial_id
+    theta_used = fitted["theta_used"]
+    assert fitted["sigma_p"] == pytest.approx(
+        (fitted["theta"]["variance_estimate"]["sigma_sq"] / (2 * theta_used)) ** 0.5,
+        rel=1e-4,
+    )
+    assert ou["units"]["mu"] == "log_price"
+
+
+def test_theta_continues_when_one_instrument_has_no_sessions(tmp_path: Path):
+    """Ряд без баров внутри окон не обрывает прогон: инструмент получает THETA_UNDEFINED."""
+    data = tmp_path / "data"
+    data.mkdir()
+    rows = [
+        f"2026-11-18T03:{minute:02d}:00Z,100.000,100.010,99.990,100.000,10"
+        for minute in range(10)
+    ]
+    (data / "NIGHT_1min.csv").write_text(
+        "\n".join([HEADER, *rows]) + "\n", encoding="utf-8"
+    )
+    (data / "NIGHT_1min.meta.json").write_text(
+        json.dumps(dict(META, ticker="NIGHT")), encoding="utf-8"
+    )
+    out = tmp_path / "out"
+
+    code = main(
+        [
+            "theta",
+            "--data-dir",
+            str(data),
+            "--out",
+            str(out),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--null-reps",
+            "50",
+        ]
+    )
+
+    assert code == 1
+    payload = json.loads((out / "theta-invariance.json").read_text(encoding="utf-8"))
+    entry = payload["payload"]["instruments"][0]
+    assert entry["gate1"] == "THETA_UNDEFINED"
+    assert entry["gate1_reasons"]
+    signature = json.loads((out / "signature-plot.json").read_text(encoding="utf-8"))
+    assert signature["payload"]["instruments"][0]["points"] == []
+    ou = json.loads((out / "ou-fit.json").read_text(encoding="utf-8"))
+    assert ou["payload"]["instruments"] == []

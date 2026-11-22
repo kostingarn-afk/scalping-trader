@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -32,11 +33,13 @@ from .theta import (
     DEFAULT_DELTAS,
     DEFAULT_NULL_REPS,
     ESCALATED_DELTAS,
+    ESCALATION_THETA,
     ThetaError,
+    aggregate_verdict,
     estimate_theta,
     fit_ou,
 )
-from .units import COUNT, MINUTE_INVERSE, MINUTES, RATIO, TICKS
+from .units import COUNT, LOG_PRICE, MINUTE_INVERSE, MINUTES, RATIO, TICKS
 from .variance import (
     DeseasonResult,
     VarianceError,
@@ -143,6 +146,15 @@ def build_parser() -> argparse.ArgumentParser:
                 type=int,
                 default=DEFAULT_NULL_REPS,
                 help="число прогонов нулевой полосы (случайное блуждание)",
+            )
+            command.add_argument(
+                "--weeks",
+                type=int,
+                default=8,
+                help=(
+                    "окно оценки в неделях (buy_frame §6.3: 4–8); 0 — вся история "
+                    "в диагностическом режиме"
+                ),
             )
     return parser
 
@@ -413,6 +425,9 @@ def _run_theta(
     if args.null_reps < 50:
         print("ошибка ввода: --null-reps должен быть не меньше 50", file=sys.stderr)
         return EXIT_INPUT
+    if args.weeks < 0:
+        print("ошибка ввода: --weeks должен быть неотрицательным", file=sys.stderr)
+        return EXIT_INPUT
 
     registry_path = args.registry or (args.out / "registry.jsonl")
     registry = TrialRegistry(registry_path)
@@ -424,6 +439,7 @@ def _run_theta(
                 "model": "gate1",
                 "frame": f"{datasets[0].interval_minutes}min",
                 "window": _window(datasets),
+                "estimation_weeks": args.weeks,
                 "deltas": list(deltas),
                 "bootstrap": args.bootstrap,
                 "null_reps": args.null_reps,
@@ -438,21 +454,43 @@ def _run_theta(
     entries: List[Dict[str, object]] = []
     flags: Dict[str, str] = {}
     for dataset in datasets:
+        bars, estimation_window = _estimation_slice(dataset, args.weeks)
         try:
             fit = estimate_theta(
-                dataset.bars,
+                bars,
                 schedule,
                 deltas=deltas,
                 bootstrap=args.bootstrap,
                 null_reps=args.null_reps,
             )
         except ThetaError as exc:
-            print(f"{dataset.instrument.name}: {exc}", file=sys.stderr)
-            return EXIT_INPUT
+            # Один непригодный ряд не должен обрывать прогон по 20 инструментам:
+            # вердикт выносится по инструменту.
+            entries.append(
+                {
+                    "instrument": dataset.instrument.name,
+                    "bars": len(bars),
+                    "estimation_window": estimation_window,
+                    "sessions": None,
+                    "gate1": "THETA_UNDEFINED",
+                    "gate1_reasons": [str(exc)],
+                    "ou_fit": None,
+                    "points": [],
+                    "null_band": None,
+                    "variance_estimate": None,
+                    "t_half_minutes": None,
+                    "t_half_exceeds_cap": False,
+                    "theta": None,
+                    "theta_ci": [None, None],
+                }
+            )
+            flags[f"theta:{dataset.instrument.name}"] = f"NO_DATA: {exc}"
+            continue
 
         entry: Dict[str, object] = {
             "instrument": dataset.instrument.name,
-            "bars": len(dataset.bars),
+            "bars": len(bars),
+            "estimation_window": estimation_window,
             "sessions": None if fit.band is None else fit.band.sessions,
             "gate1": fit.verdict,
             **fit.to_dict(),
@@ -464,10 +502,19 @@ def _run_theta(
             flags[f"horizon:{dataset.instrument.name}"] = (
                 f"SCOPE: t1/2={float(half_life):.1f} мин > tau_cap={tau_cap}"
             )
+        if fit.theta_used <= ESCALATION_THETA and not args.escalate:
+            flags[f"escalation:{dataset.instrument.name}"] = (
+                f"SUGGEST_ESCALATION: θ={fit.theta_used:.4f} ≤ {ESCALATION_THETA} — "
+                "повторить с --escalate (сетка Δ до 60)"
+            )
         if fit.gate1_passed:
             try:
                 entry["ou_fit"] = fit_ou(
-                    dataset.instrument.name, dataset.bars, schedule, fit
+                    dataset.instrument.name,
+                    bars,
+                    schedule,
+                    fit,
+                    registry_id=trial.id,
                 ).to_dict()
             except ThetaError as exc:
                 entry["gate1"] = "THETA_UNDEFINED"
@@ -484,52 +531,205 @@ def _run_theta(
         if args.escalate:
             flags[f"deltas:{dataset.instrument.name}"] = "ESCALATED:60"
 
-    passed = [entry for entry in entries if entry["gate1"] == "PASS"]
-    verdict = "PASS" if passed else "THETA_UNDEFINED"
-    payload = build_artifact(
-        name="theta_invariance_regression",
-        units={
-            "theta": MINUTE_INVERSE,
-            "horizon": MINUTES,
-            "sigma": RATIO,
-            "variance": RATIO,
-            "count": COUNT,
-        },
-        n={str(entry["instrument"]): int(entry["bars"]) for entry in entries},  # type: ignore[arg-type]
-        method=(
-            "ACF лог-цены внутри торгового окна (пары только при точном шаге Δ), регрессия "
-            "θ̂ на 1/Δ, CI блочным bootstrap по сессиям; дисперсионная оценка "
-            "Var(x_{t+Δ}−x_t) = (σ²/θ)(1−e^{−θΔ}) + 2ω²; Gate 1 по нулевой полосе "
-            "случайного блуждания с той же геометрией окон"
+    verdict = aggregate_verdict(str(entry["gate1"]) for entry in entries)
+    passed = sum(1 for entry in entries if entry["gate1"] == "PASS")
+    instruments_n = {str(entry["instrument"]): int(entry["bars"]) for entry in entries}  # type: ignore[arg-type]
+    common = {
+        "trial_id": trial.id,
+        "gate1": verdict,
+        "deltas": list(deltas),
+        "escalated": bool(args.escalate),
+        "estimation_weeks": args.weeks,
+        "tau_cap_minutes": tau_cap,
+    }
+
+    _write(
+        args.out / "theta-invariance.json",
+        json.dumps(
+            build_artifact(
+                name="theta_invariance_regression",
+                units={"theta": MINUTE_INVERSE, "horizon": MINUTES, "count": COUNT},
+                n=instruments_n,
+                method=(
+                    "ACF лог-цены внутри торгового окна (пары только при точном шаге Δ), "
+                    "регрессия θ̂ на 1/Δ, CI блочным bootstrap по сессиям; дисперсионная "
+                    "оценка Var(x_{t+Δ}−x_t) = (σ²/θ)(1−e^{−θΔ}) + 2ω² профильным МНК"
+                ),
+                flags=flags,
+                payload={
+                    **common,
+                    "instruments": [
+                        {
+                            key: entry.get(key)
+                            for key in (
+                                "instrument",
+                                "bars",
+                                "sessions",
+                                "estimation_window",
+                                "gate1",
+                                "gate1_reasons",
+                                "theta",
+                                "theta_ci",
+                                "theta_used",
+                                "slope",
+                                "slope_ci",
+                                "noise_ratio",
+                                "method",
+                                "t_half_minutes",
+                                "t_half_ci",
+                                "t_half_exceeds_cap",
+                                "variance_estimate",
+                                "null_band",
+                                "flags",
+                            )
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
         ),
-        flags=flags,
-        payload={
-            "trial_id": trial.id,
-            "gate1": verdict,
-            "deltas": list(deltas),
-            "escalated": bool(args.escalate),
-            "tau_cap_minutes": tau_cap,
-            "instruments": entries,
-        },
+    )
+    _write(
+        args.out / "signature-plot.json",
+        json.dumps(
+            build_artifact(
+                name="signature_plot",
+                units={"theta": MINUTE_INVERSE, "horizon": MINUTES, "count": COUNT},
+                n=instruments_n,
+                method="θ̂(Δ) и ρ̂(Δ) по окнам; точки с ρ̂ вне (0, 1) помечены NO_DATA",
+                flags={},
+                payload={
+                    "trial_id": trial.id,
+                    "instruments": [
+                        {
+                            "instrument": entry["instrument"],
+                            "points": entry.get("points") or [],
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "null-band.json",
+        json.dumps(
+            build_artifact(
+                name="null_band",
+                units={"theta": MINUTE_INVERSE, "count": COUNT},
+                n={
+                    str(entry["instrument"]): int(entry["sessions"] or 0)
+                    for entry in entries
+                },  # type: ignore[arg-type]
+                method=(
+                    "Та же процедура оценки θ на симулированном случайном блуждании "
+                    "с теми же длинами торговых окон; 2.5–97.5 перцентили; зависит только "
+                    "от геометрии окон"
+                ),
+                flags={},
+                payload={
+                    "trial_id": trial.id,
+                    "replications": args.null_reps,
+                    "instruments": [
+                        {
+                            "instrument": entry["instrument"],
+                            "sessions": entry.get("sessions"),
+                            "band": entry.get("null_band"),
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "ou-fit.json",
+        json.dumps(
+            build_artifact(
+                name="ou_fit",
+                units={
+                    "theta": MINUTE_INVERSE,
+                    "horizon": MINUTES,
+                    "sigma": RATIO,
+                    "sigma_p": RATIO,
+                    "mu": LOG_PRICE,
+                    "count": COUNT,
+                },
+                n={
+                    str(entry["instrument"]): int(entry["bars"])
+                    for entry in entries
+                    if entry.get("ou_fit")
+                }
+                or {"fitted": 0},
+                method=(
+                    "σ² из дисперсионной модели (A·θ), σ_P = σ/√(2θ_used), "
+                    "μ — среднее лог-цены в окнах; ρ_model — диагностика"
+                ),
+                flags={key: value for key, value in flags.items() if key.startswith("sigma")},
+                payload={
+                    "trial_id": trial.id,
+                    "instruments": [
+                        entry["ou_fit"] for entry in entries if entry.get("ou_fit")
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
     )
 
-    _write(args.out / "theta.md", _format_theta(entries, trial.id, verdict))
-    _write(args.out / "theta.json", json.dumps(payload, ensure_ascii=False, indent=2))
+    _write(args.out / "theta.md", _format_theta(entries, trial.id, verdict, args.weeks))
     print(
         f"отчёт сохранён: {args.out / 'theta.md'}; вердикт Gate 1: {verdict} "
-        f"({len(passed)}/{len(entries)}); опыт: {trial.id}"
+        f"({passed}/{len(entries)}); опыт: {trial.id}"
     )
     return EXIT_OK if verdict == "PASS" else EXIT_GATE
 
 
+def _estimation_slice(
+    dataset: HistoryDataset, weeks: int
+) -> Tuple[Sequence, Dict[str, object]]:
+    """Бары последних `weeks` недель: окно оценки 4–8 недель по `buy_frame.md` §6.3.
+
+    `weeks = 0` — вся история (диагностический режим): тогда окно фиксируется фактическими
+    границами, чтобы артефакт нельзя было прочитать как «4–8 недель».
+    """
+    bars = dataset.bars
+    if not bars:
+        raise ThetaError(f"{dataset.instrument.name}: нет баров")
+    last = bars[-1].ts
+    window: Dict[str, object] = {"weeks": weeks, "to": last.isoformat()}
+    if weeks == 0:
+        window["from"] = bars[0].ts.isoformat()
+        window["mode"] = "full-history"
+        return bars, window
+    cutoff = last - timedelta(weeks=weeks)
+    sliced = [bar for bar in bars if bar.ts >= cutoff]
+    window["from"] = cutoff.isoformat()
+    window["mode"] = "trailing-weeks"
+    window["bars"] = len(sliced)
+    return sliced, window
+
+
 def _format_theta(
-    entries: Sequence[Dict[str, object]], trial_id: str, verdict: str
+    entries: Sequence[Dict[str, object]], trial_id: str, verdict: str, weeks: int
 ) -> str:
     passed = sum(1 for entry in entries if entry["gate1"] == "PASS")
     lines = ["# Gate 1 — идентификация θ", ""]
+    window_note = (
+        "вся история (диагностический режим)"
+        if weeks == 0
+        else f"последние {weeks} недель от последнего бара"
+    )
     lines.append(
-        f"Опыт `{trial_id}`; инструментов: {len(entries)}; Gate 1 пройден: {passed}; "
-        f"вердикт: **{verdict}**."
+        f"Опыт `{trial_id}`; инструментов: {len(entries)}; окно оценки: {window_note}; "
+        f"Gate 1 пройден: {passed}; вердикт: **{verdict}**."
     )
     lines.append("")
     lines.append(
