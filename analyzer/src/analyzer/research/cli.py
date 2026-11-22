@@ -8,15 +8,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..backtest.loader import HistoryDataset, scan_dir
 from .artifacts import build_artifact, collect_flags
 from .costs import CostEstimate, estimate_cost
-from .ev import entry_decision, select_tau
+from .ev import (
+    COMPONENT_OK,
+    COMPONENT_REFERENCE,
+    entry_decision,
+    select_tau,
+    tau_max_components,
+)
 from .first_passage import FirstPassageError, build_curve
 from .gate0a import (
     DEFAULT_TAUS as GATE_TAUS,
@@ -27,6 +34,12 @@ from .gate0a import (
 from .gate0a import build_artifact as build_gate_artifact
 from .integrity import CRITICAL, IntegrityReport, check_integrity
 from .policy import PolicyError, declare_barriers, load_policy
+from .regime import (
+    MTF_DISAGREEMENT_LIMIT,
+    RegimeError,
+    RegimeReport,
+    evaluate_regime,
+)
 from .registry import RegistryError, TrialRegistry
 from .sessions import SessionSchedule
 from .signals import SignalError, ou_signals, session_ohlcv
@@ -200,6 +213,18 @@ def build_parser() -> argparse.ArgumentParser:
             )
             command.add_argument(
                 "--policy", type=Path, default=None, help="YAML с параметрами политики"
+            )
+            command.add_argument(
+                "--regime-seeds",
+                type=int,
+                default=5,
+                help="число рестартов HMM (берётся лучший likelihood)",
+            )
+            command.add_argument(
+                "--position-rub",
+                type=float,
+                default=200_000.0,
+                help="размер позиции в рублях для τ_liq",
             )
     return parser
 
@@ -777,7 +802,7 @@ def _run_ev(
 
     theta_dir = args.theta_dir or args.out
     try:
-        upstream, theta_trial = _load_theta_upstream(theta_dir)
+        upstream, theta_trial, theta_extras = _load_theta_upstream(theta_dir)
     except (OSError, ValueError) as exc:
         print(f"ошибка ввода: {exc}", file=sys.stderr)
         return EXIT_INPUT
@@ -889,8 +914,47 @@ def _run_ev(
         selection = select_tau(
             curve, waiting_bars=signals.waiting_bars, tau_cap=policy.tau_cap_minutes
         )
-        # τ_max из семи компонентов — шаг R3.2; пока гейт работает по τ_cap, и это видно в флагах.
-        decision = entry_decision(curve, selection, tau_max=policy.tau_cap_minutes)
+        regime, regime_error = _regime_report(sessions, name, policy.q, args.regime_seeds)
+        if regime_error:
+            flags[f"regime:{name}"] = f"REGIME_FAILED: {regime_error}"
+        tau_regime = (
+            regime.survival.tau_minutes
+            if regime is not None and regime.survival is not None
+            else None
+        )
+        tau_mtf = regime.mtf_tau_minutes if regime is not None else None
+        regime_status = (
+            COMPONENT_REFERENCE
+            if regime is None or tau_regime is None
+            else COMPONENT_OK
+        )
+        tau_liq = _tau_liquidation(
+            bars,
+            price=price,
+            lot_size=int(dataset.instrument.lot_size),
+            tick_value=tick.value,
+            position_rub=args.position_rub,
+            rho_max=policy.rho_max,
+        )
+        tau_session, tau_session_min = _session_horizon(
+            sessions, signals.signals, schedule, tau_liq
+        )
+        tau_model = theta_extras.get("tau_model")
+        if not isinstance(tau_model, int) or tau_model < 1:
+            tau_model = policy.tau_cap_minutes
+            flags[f"tau_model:{name}"] = "TAU_MODEL_MISSING: взят τ_cap"
+        tau_max = tau_max_components(
+            curve,
+            tau_model=tau_model,
+            tau_liq=tau_liq,
+            tau_session=tau_session,
+            tau_cap=policy.tau_cap_minutes,
+            tau_regime=tau_regime,
+            tau_mtf=tau_mtf,
+            regime_status=regime_status,
+        )
+        # τ_max из семи компонентов собран; неполный набор виден в complete и во флагах.
+        decision = entry_decision(curve, selection, tau_max=tau_max.value or 0)
         # §3 holding_exiting.md: EV ≤ a − Cost, поэтому a ≤ Cost исключает положительный EV
         # при любых вероятностях. §2 требует a ≤ D = A_0·σ_P: барьер выше стационарного
         # масштаба — уже не mean reversion. Оба условия диагностические, не гейты.
@@ -936,12 +1000,15 @@ def _run_ev(
                 },
                 "points": [point.to_dict() for point in curve.points],
                 "tau_star": selection.to_dict(),
-                "entry": decision.to_dict(),
-                "tau_max": {
-                    "value": policy.tau_cap_minutes,
-                    "source": "tau_cap",
-                    "complete": False,
+                "tau_max": tau_max.to_dict(),
+                "regime": None if regime is None else regime.to_dict(),
+                "horizons": {
+                    "tau_liq": tau_liq,
+                    "tau_session_median": tau_session,
+                    "tau_session_min": tau_session_min,
+                    "tau_model": tau_model,
                 },
+                "entry": decision.to_dict(),
             }
         )
 
@@ -963,7 +1030,12 @@ def _run_ev(
                 f"Cost={cost.round_trip_ticks:.2f})"
             )
         flags[f"signal:{name}"] = "PROVISIONAL_SIGNAL"
-        flags[f"tau_max:{name}"] = "TAU_MAX_INCOMPLETE: только tau_cap (R3.2)"
+        flags[f"liq:{name}"] = "ASSUMPTION:volume-in-lots"
+        if not tau_max.complete:
+            flags[f"tau_max:{name}"] = "TAU_MAX_INCOMPLETE: " + "; ".join(tau_max.reasons)
+        if regime is not None:
+            for key, value in regime.gates.items():
+                flags[f"regime_{key}:{name}"] = value
         flags[f"entry:{name}"] = (
             f"ALLOWED tau={decision.tau}" if decision.allowed else f"BLOCKED {decision.reason}"
         )
@@ -1021,6 +1093,7 @@ def _run_ev(
                                 "sanity",
                                 "signals",
                                 "curve_meta",
+                                "horizons",
                             )
                         }
                         for entry in entries
@@ -1107,6 +1180,70 @@ def _run_ev(
     )
 
     _write(
+        args.out / "tau-max.json",
+        json.dumps(
+            build_artifact(
+                name="tau_max_components",
+                units={"horizon": MINUTES, "count": COUNT},
+                n=instruments_n,
+                method=(
+                    "τ_max = min(τ_edge, τ_regime, τ_mtf, τ_model, τ_liq, τ_session, τ_cap); "
+                    "отсутствующий компонент помечается REFERENCE_ONLY/MISSING и не заменяется "
+                    "единицей; τ_edge, τ_regime, τ_mtf, τ_liq округляются вверх, τ_max — вниз"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial.id,
+                    "tau_cap_minutes": policy.tau_cap_minutes,
+                    "instruments": [
+                        {
+                            "instrument": entry["instrument"],
+                            "tau_max": entry["tau_max"],
+                            "entry": entry["entry"],
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "regime.json",
+        json.dumps(
+            build_artifact(
+                name="hmm_fit",
+                units={"horizon": MINUTES, "ratio": RATIO, "count": COUNT},
+                n={
+                    str(entry["instrument"]): int(entry["regime"]["hmm"]["observations"])  # type: ignore[index]
+                    for entry in entries
+                    if entry.get("regime") and entry["regime"].get("hmm")  # type: ignore[union-attr]
+                }
+                or {"instruments": 0},
+                method=(
+                    "GaussianHMM(K=2, diag) на 15m-барах внутри торговых окон; состояния "
+                    "упорядочены по range-волатильности; Gate 2 = N_trans ≥ 10·K(K−1); "
+                    "γ и P_LCB (Уилсон) по матрице переходов; τ_mtf укорачивается при "
+                    "расхождении 10m-разметки"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial.id,
+                    "q": policy.q,
+                    "mtf_disagreement_limit": MTF_DISAGREEMENT_LIMIT,
+                    "instruments": [
+                        {"instrument": entry["instrument"], "regime": entry["regime"]}
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+    _write(
         args.out / "ev.md",
         _format_ev(entries, skipped, trial.id, verdict, args.weeks),
     )
@@ -1117,8 +1254,10 @@ def _run_ev(
     return EXIT_OK if verdict == "PASS" else EXIT_GATE
 
 
-def _load_theta_upstream(directory: Path) -> Tuple[Dict[str, Dict[str, object]], str]:
-    """Прочитать θ, σ, σ_P из артефактов Gate 1: без них EV не считается."""
+def _load_theta_upstream(
+    directory: Path,
+) -> Tuple[Dict[str, Dict[str, object]], str, Dict[str, object]]:
+    """Прочитать θ, σ, σ_P и горизонт инвариантности из артефактов Gate 1."""
     theta_path = directory / "theta-invariance.json"
     ou_path = directory / "ou-fit.json"
     missing = [str(path) for path in (theta_path, ou_path) if not path.is_file()]
@@ -1133,6 +1272,13 @@ def _load_theta_upstream(directory: Path) -> Tuple[Dict[str, Dict[str, object]],
     theta_payload = theta_artifact.get("payload") or {}
     ou_payload = ou_artifact.get("payload") or {}
     theta_trial = str(theta_payload.get("trial_id") or "")
+
+    deltas = [int(delta) for delta in (theta_payload.get("deltas") or []) if int(delta) > 0]
+    extras: Dict[str, object] = {
+        "tau_model": max(deltas) if deltas else None,
+        "escalated": bool(theta_payload.get("escalated")),
+        "estimation_weeks": theta_payload.get("estimation_weeks"),
+    }
 
     by_name: Dict[str, Dict[str, object]] = {}
     for entry in theta_payload.get("instruments") or []:
@@ -1159,7 +1305,7 @@ def _load_theta_upstream(directory: Path) -> Tuple[Dict[str, Dict[str, object]],
             value = source.get(key)
             if not isinstance(value, (int, float)) or not value > 0:
                 raise ValueError(f"{name}: артефакт Gate 1 не содержит положительного {key}")
-    return by_name, theta_trial
+    return by_name, theta_trial, extras
 
 
 def _median_price(bars: Sequence) -> float:
@@ -1168,6 +1314,64 @@ def _median_price(bars: Sequence) -> float:
     if not closes:
         raise ThetaError("нет баров для опорной цены")
     return closes[len(closes) // 2]
+
+
+def _regime_report(
+    sessions: Sequence, instrument: str, q: float, seeds: int
+) -> Tuple[Optional[RegimeReport], Optional[str]]:
+    """Режимная модель инструмента; ошибка не обрывает прогон, а идёт в флаги."""
+    try:
+        return evaluate_regime(sessions, instrument=instrument, q=q, seeds=seeds), None
+    except RegimeError as exc:
+        return None, str(exc)
+
+
+def _tau_liquidation(
+    bars: Sequence,
+    *,
+    price: float,
+    lot_size: int,
+    tick_value: float,
+    position_rub: float,
+    rho_max: float,
+) -> int:
+    """`τ_liq = Δt·⌈Q/(ρ_max·V_1m)⌉`: минут на выход без превышения доли объёма бара.
+
+    `Q` — позиция в лотах, `V_1m` — медианный объём бара. Единицы объёма в CSV не размечены
+    (T-Invest отдаёт объём в лотах), поэтому оба числа берутся в лотах, а допущение помечается
+    `ASSUMPTION:volume-in-lots` в флагах артефакта.
+    """
+    if position_rub <= 0:
+        raise ValueError("position size must be positive")
+    if lot_size < 1 or price <= 0 or tick_value <= 0:
+        raise ValueError("price, lot_size and tick_value must be positive")
+    lots = max(1, int(position_rub // (price * lot_size)))
+    volumes = sorted(float(bar.volume) for bar in bars)
+    median_volume = volumes[len(volumes) // 2] if volumes else 0.0
+    if median_volume <= 0:
+        return 1
+    return max(1, int(math.ceil(lots / (rho_max * median_volume))))
+
+
+def _session_horizon(
+    sessions: Sequence, signals: Sequence, schedule: SessionSchedule, tau_liq: int
+) -> Tuple[int, int]:
+    """Горизонт до закрытия окна по сигналам: медиана и минимум.
+
+    Медиана — политический горизонт (типичный вход), минимум — худший случай: сигнал у самого
+    закрытия отбрасывается на исполнении, а не обнуляет горизонт всего инструмента.
+    """
+    horizons = []
+    for signal in signals:
+        stamps = sessions[signal.session]["ts"]
+        if signal.index >= len(stamps):
+            continue
+        moment = datetime.fromtimestamp(int(stamps[signal.index]), tz=timezone.utc)
+        horizons.append(schedule.tau_session(moment, tau_liq_minutes=tau_liq, bar_minutes=1))
+    if not horizons:
+        return 0, 0
+    ordered = sorted(horizons)
+    return max(0, ordered[len(ordered) // 2]), max(0, ordered[0])
 
 
 def _format_ev(
@@ -1186,23 +1390,55 @@ def _format_ev(
     if entries:
         lines.append(
             "| Инструмент | θ, мин⁻¹ | σ_P, тики | Барьеры TP/SL | Cost "
-            "| Верх. граница EV = a−C | τ* | EV(τ*) | EV_LCB | Вход |"
+            "| Верх. граница EV = a−C | τ* | EV(τ*) | EV_LCB | τ_max | Вход |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for entry in entries:
             tau_star = entry["tau_star"]
             entry_decision_payload = entry["entry"]
             barriers = entry["barriers"]
+            tau_max_payload = entry["tau_max"]
             lines.append(
                 f"| {entry['instrument']} | {_fmt(entry['theta'])} | {_fmt(entry['sigma_p_ticks'])} "
                 f"| {barriers['tp_ticks']}/{barriers['sl_ticks']} "  # type: ignore[index]
                 f"| {_fmt(entry['cost']['round_trip_ticks'])} "  # type: ignore[index]
                 f"| {_fmt(entry['sanity']['max_ev_upper_bound'])} "  # type: ignore[index]
                 f"| {_fmt(tau_star['tau'])} | {_fmt(tau_star['ev'])} | {_fmt(tau_star['ev_lcb'])} "  # type: ignore[index]
+                f"| {_fmt(tau_max_payload['value'])} "  # type: ignore[index]
                 f"| {entry_decision_payload['reason']} |"  # type: ignore[index]
             )
         lines.append("")
         lines.append("EV и EV_LCB — в тиках на одну сделку после круговых издержек.")
+        lines.append("")
+        lines.append("## Компоненты `τ_max`")
+        lines.append("")
+        for entry in entries:
+            tau_max_payload = entry["tau_max"]
+            parts = []
+            for item in tau_max_payload["components"]:  # type: ignore[index]
+                value = "—" if item["value"] is None else item["value"]
+                parts.append(f"{item['component']}={value}({item['status']})")
+            lines.append(
+                f"- **{entry['instrument']}**: τ_max={tau_max_payload['value']}; "  # type: ignore[index]
+                + ", ".join(parts)
+            )
+        lines.append("")
+        lines.append("## Режим")
+        lines.append("")
+        for entry in entries:
+            regime = entry.get("regime")
+            if not regime:
+                lines.append(f"- **{entry['instrument']}**: режимная модель не построена")
+                continue
+            hmm = regime.get("hmm") or {}
+            survival_payload = regime.get("survival") or {}
+            lines.append(
+                f"- **{entry['instrument']}**: Gate 2 — {hmm.get('gate2', '—')} "
+                f"({hmm.get('transition_counts', '—')} переходов при пороге "
+                f"{hmm.get('gate2_threshold', '—')}); γ = {_fmt(survival_payload.get('gamma'))}, "
+                f"P_LCB = {_fmt(survival_payload.get('p_lcb'))}, "
+                f"расхождение 10m = {_fmt(regime.get('mtf_disagreement'))}"
+            )
         lines.append("")
         lines.append("## Причины по инструментам")
         lines.append("")

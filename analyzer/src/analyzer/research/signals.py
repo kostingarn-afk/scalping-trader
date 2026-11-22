@@ -114,6 +114,7 @@ def session_ohlcv(bars: Sequence[Bar], schedule: SessionSchedule) -> List[Sessio
         ordered = [grouped[key][stamp] for stamp in sorted(grouped[key])]
         result.append(
             {
+                "ts": np.asarray([int(bar.ts.timestamp()) for bar in ordered], dtype=np.int64),
                 "open": np.asarray([bar.open for bar in ordered], dtype=float),
                 "high": np.asarray([bar.high for bar in ordered], dtype=float),
                 "low": np.asarray([bar.low for bar in ordered], dtype=float),

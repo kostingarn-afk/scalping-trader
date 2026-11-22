@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from math import isfinite, sqrt
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -206,15 +207,166 @@ def ladder(
     return rows
 
 
+# --- верхние границы горизонта ---------------------------------------------
+
+COMPONENT_OK = "OK"
+COMPONENT_REFERENCE = "REFERENCE_ONLY"
+COMPONENT_MISSING = "MISSING"
+
+#: Имена компонент `τ_max` в порядке объявления (`holding_exiting.md` §6).
+TAU_COMPONENTS: Tuple[str, ...] = (
+    "edge",
+    "regime",
+    "mtf",
+    "model",
+    "liq",
+    "session",
+    "cap",
+)
+#: Компоненты, которые округляются вверх; `τ_max` — вниз, кратным Δt.
+ROUND_UP_COMPONENTS = frozenset({"edge", "regime", "mtf", "liq"})
+
+
+@dataclass(frozen=True)
+class TauComponent:
+    """Один компонент `τ_max`: значение в минутах и статус."""
+
+    name: str
+    value: Optional[int]
+    status: str
+    note: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "component": self.name,
+            "value": self.value,
+            "status": self.status,
+            "note": self.note,
+            "rounding": "up" if self.name in ROUND_UP_COMPONENTS else "down",
+        }
+
+
+@dataclass(frozen=True)
+class TauMax:
+    """Итог: минимум компонент, полнота набора и причины ограничений."""
+
+    value: Optional[int]
+    components: Tuple[TauComponent, ...]
+    complete: bool
+    reasons: Tuple[str, ...]
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "value": self.value,
+            "complete": self.complete,
+            "components": [item.to_dict() for item in self.components],
+            "reasons": list(self.reasons),
+            "units": {"value": "minutes"},
+        }
+
+
+def _round_up(value: float, step: int) -> int:
+    return int(math.ceil(value / step)) * step
+
+
+def _round_down(value: float, step: int) -> int:
+    return int(math.floor(value / step)) * step
+
+
+def tau_max_components(
+    curve: EVCurve,
+    *,
+    tau_model: int,
+    tau_liq: int,
+    tau_session: int,
+    tau_cap: int,
+    tau_regime: Optional[int] = None,
+    tau_mtf: Optional[int] = None,
+    regime_status: str = COMPONENT_MISSING,
+    step: int = 1,
+) -> TauMax:
+    """Собрать `τ_max = min(τ_edge, τ_regime, τ_mtf, τ_model, τ_liq, τ_session, τ_cap)`.
+
+    Отсутствующий компонент не подменяется единицей и не выбрасывается молча: он помечается
+    `REFERENCE_ONLY`/`MISSING`, попадает в `reasons`, а `complete` становится `False`.
+    `τ_edge` — единственный компонент, отсутствие которого означает «входа нет»: если нет τ
+    с `EV_LCB > 0`, минимум по остальным не имеет смысла.
+    """
+    if step < 1:
+        raise ValueError("step must be at least 1")
+    if tau_model < 1 or tau_liq < 1 or tau_cap < 1:
+        raise ValueError("tau_model, tau_liq and tau_cap must be at least 1")
+    if tau_session < 0:
+        raise ValueError("tau_session must be non-negative")
+
+    positive = [point for point in curve.positive()]
+    components: List[TauComponent] = []
+    reasons: List[str] = []
+
+    if positive:
+        edge_value = _round_up(max(point.tau for point in positive), step)
+        components.append(TauComponent("edge", edge_value, COMPONENT_OK))
+    else:
+        components.append(
+            TauComponent("edge", None, COMPONENT_MISSING, "нет τ с EV_LCB > 0")
+        )
+        reasons.append("τ_edge не определён: нет τ с EV_LCB > 0 — вход запрещён")
+
+    if tau_regime is None:
+        components.append(
+            TauComponent("regime", None, regime_status, "режимная модель не дала горизонт")
+        )
+        reasons.append("τ_regime отсутствует: режимная модель не идентифицирована")
+    else:
+        components.append(TauComponent("regime", _round_up(tau_regime, step), COMPONENT_OK))
+
+    if tau_mtf is None:
+        components.append(
+            TauComponent("mtf", None, regime_status, "согласованность 10m не оценена")
+        )
+    else:
+        components.append(TauComponent("mtf", _round_up(tau_mtf, step), COMPONENT_OK))
+
+    components.append(TauComponent("model", _round_up(tau_model, step), COMPONENT_OK))
+    components.append(TauComponent("liq", _round_up(tau_liq, step), COMPONENT_OK))
+    components.append(TauComponent("session", tau_session, COMPONENT_OK))
+    components.append(TauComponent("cap", tau_cap, COMPONENT_OK))
+
+    limited = [item for item in components if item.value is not None]
+    if not any(item.name == "edge" and item.value is not None for item in components):
+        value = None
+    else:
+        value = _round_down(min(int(item.value) for item in limited), step)  # type: ignore[arg-type]
+        if value <= 0:
+            value = 0
+            reasons.append("τ_max = 0: хотя бы один компонент не оставляет горизонта")
+
+    complete = all(item.status != COMPONENT_MISSING for item in components)
+    return TauMax(
+        value=value,
+        components=tuple(components),
+        complete=complete,
+        reasons=tuple(reasons),
+    )
+
+
 __all__ = [
     "BOUNDARY",
+    "COMPONENT_MISSING",
+    "COMPONENT_OK",
+    "COMPONENT_REFERENCE",
     "EntryDecision",
     "NO_TAU",
     "OK",
+    "ROUND_UP_COMPONENTS",
     "SCOPE_VIOLATION",
+    "TAU_COMPONENTS",
+    "TauComponent",
+    "TauMax",
     "TauStarSelection",
     "entry_decision",
     "ladder",
     "objective",
     "select_tau",
+    "tau_max_components",
 ]

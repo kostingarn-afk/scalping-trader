@@ -148,8 +148,12 @@ def test_ev_writes_artifacts_and_registers_trial(paths):
     assert (out / "ev.md").is_file()
     assert protocol["payload"]["theta_trial_id"] == "abcd1234"
     assert curve["payload"]["instruments"][0]["instrument"] == "TEST@TQBR"
-    assert star["payload"]["instruments"][0]["tau_max"]["complete"] is False
-    assert "TAU_MAX_INCOMPLETE" in protocol["flags"]["tau_max:TEST@TQBR"]
+    tau_max = star["payload"]["instruments"][0]["tau_max"]
+    assert len(tau_max["components"]) == 7
+    assert tau_max["value"] is not None
+    assert "tau_max:TEST@TQBR" not in protocol["flags"]
+    assert (out / "tau-max.json").is_file()
+    assert (out / "regime.json").is_file()
 
     records = [
         json.loads(line)
