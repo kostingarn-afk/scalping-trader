@@ -262,3 +262,36 @@ def test_ev_negative_bound_is_flagged_when_floor_is_weaker_than_cost(tmp_path: P
     entry = protocol["payload"]["instruments"][0]
     assert entry["sanity"]["viable"] is False
     assert "NEGATIVE_BOUND" in protocol["flags"]["sanity:TEST@TQBR"]
+
+
+def test_execute_writes_journal_and_refuses_without_tau(paths):
+    """Исполнение пишет все артефакты; без положительного EV журнал пуст, отказы с причиной."""
+    data, theta_dir, out, registry = paths
+
+    code = main(_args(data, theta_dir, out, registry, "--bootstrap", "20")
+                + ["--regime-seeds", "2"])
+
+    assert code in (0, 1)
+    # основная подкоманда — ev; здесь проверяем, что execute даёт свои артефакты
+    code = main(
+        [
+            "execute",
+            "--data-dir", str(data),
+            "--out", str(out),
+            "--theta-dir", str(theta_dir),
+            "--registry", str(registry),
+            "--bootstrap", "20",
+            "--regime-seeds", "2",
+        ]
+    )
+    assert code in (0, 1)
+    trade_log = json.loads((out / "trade-log.json").read_text(encoding="utf-8"))
+    no_trade = json.loads((out / "no-trade.json").read_text(encoding="utf-8"))
+    triggers = json.loads((out / "exit-triggers.json").read_text(encoding="utf-8"))
+    assert trade_log["payload"]["trades"] == []
+    assert no_trade["payload"]["counts"]
+    assert len(triggers["payload"]["triggers"]) == 11
+    assert triggers["payload"]["reducing"] == ["mtf_confirmation", "vol_spike"]
+    assert (out / "execute.md").is_file()
+    hold = json.loads((out / "hold-rule.json").read_text(encoding="utf-8"))
+    assert hold["payload"]["lambda_risk"] == pytest.approx(2.0 / (2 * 2**0.5))

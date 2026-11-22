@@ -146,19 +146,37 @@ regime confidence, session), редукция (`Regime confirmation 10m`, `Vol s
 
 Артефакты (конверт `build_artifact`, единицы из закрытого списка):
 `first_passage-protocol.json` (`first_passage_protocol`), `ev-curve.json` (`ev_curve`),
-`tau-star.json` (`tau_star_selection`), затем `tau_max_components`, `hmm_fit`,
-`regime_survival`, `regime_survival_10m`, `hold_rule_config`, `online_band_spec`,
-`exit_trigger_table`, `trade_log`, `no_trade_reports`.
+`tau-star.json` (`tau_star_selection`), `tau-max.json` (`tau_max_components`),
+`regime.json` (`hmm_fit`), `trade-log.json` (`trade_log`), `no-trade.json`
+(`no_trade_reports`), `hold-rule.json` (`hold_rule_config`), `online-band.json`
+(`online_band_spec`), `exit-triggers.json` (`exit_trigger_table`).
 
 Единицы, добавленные в закрытый список под R3: `ticks^2` (дисперсия исхода),
 `ticks/sqrt(min)` (диффузионная σ в тиках), `min^-1/2` (объектив `τ*`
 `EV/√(V·(τ+w))`). Без них артефакт пришлось бы помечать чужой единицей.
 
 CLI: `analyzer-research ev --data-dir … --out … [--theta-dir …] [--weeks 4–8|0]
-[--taus …] [--bootstrap …] [--policy yaml]`; `theta`/σ/σ_P читаются из артефактов Gate 1
-(`--theta-dir`, по умолчанию каталог `--out`) — без них подкоманда возвращает код 2, а не
-пересчитывает θ по другому окну молча. Коды возврата: 0 — есть вход, 1 — вердикт без входа,
-2 — ошибка ввода.
+[--taus …] [--bootstrap …] [--policy yaml] [--regime-seeds n] [--position-rub n]`;
+`execute` принимает те же аргументы и дополнительно пишет журнал сделок. θ/σ/σ_P читаются из
+артефактов Gate 1 (`--theta-dir`, по умолчанию каталог `--out`) — без них подкоманда
+возвращает код 2, а не пересчитывает θ по другому окну молча. Коды возврата: 0 — есть вход,
+1 — вердикт без входа, 2 — ошибка ввода.
+
+## 10. Допущения исполнения
+
+Три допущения видны в артефактах и не скрываются:
+
+- `NO_SPREAD_FORECAST` — спред будущего момента не прогнозируется; `E[C_later] − C_now = 0`,
+  поэтому триггер `close_cost_drift` срабатывает только при явно заданной модели спреда;
+- `NO_SIGMA_CI` — CI для `σ_P` в R2 не строился, полоса валидности использует точечную
+  оценку; CI у `θ` есть и подставляется в `θ_LCB`/`θ_UCB`;
+- `STRIDE` — `m_rem`/`s_rem` оцениваются по тем же барам с прореживанием (stride 5): полный
+  перебор на каждом баре удержания недопустим по стоимости. Недостаток путей даёт
+  `ESTIMATE_MISSING` и закрытие позиции, а не удержание по умолчанию.
+
+Порядок проверок на баре: SL → TP → time stop → regime breaker (CUSUM, порог 4) → session →
+vol spike (×3 медианы range) → model invalid → правило §7. Жёсткие триггеры закрывают раньше
+«штатных»: если бар задел барьер, вопрос «держать ли» уже не стоит.
 
 ## 9. Границы
 

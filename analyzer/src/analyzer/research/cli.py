@@ -25,6 +25,19 @@ from .ev import (
     tau_max_components,
 )
 from .first_passage import FirstPassageError, build_curve
+from .holding import (
+    CLOSING_TRIGGERS,
+    CUSUM_THRESHOLD,
+    EXIT_TRIGGERS,
+    REDUCING_TRIGGERS,
+)
+from .policy_exec import (
+    VOL_SPIKE_MULTIPLIER,
+    ExecutionConfig,
+    ExecutionError,
+    ExecutionResult,
+    execute_policy,
+)
 from .gate0a import (
     DEFAULT_TAUS as GATE_TAUS,
     PhiStarTable,
@@ -103,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("phi-star", "Gate 0a: φ*(τ) = Cost / σ_τ"),
         ("theta", "Gate 1: θ по инвариантности и OU-параметры"),
         ("ev", "R3: вероятности касания, EV(τ), τ* и входной гейт"),
+        ("execute", "R3: офлайн-исполнение политики (trade_log)"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("--data-dir", required=True, type=Path, help="каталог выгрузок")
@@ -187,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "в диагностическом режиме"
                 ),
             )
-        if name == "ev":
+        if name in ("ev", "execute"):
             command.add_argument(
                 "--theta-dir",
                 type=Path,
@@ -253,6 +267,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_theta(args, datasets, schedule)
     if args.command == "ev":
         return _run_ev(args, datasets, schedule)
+    if args.command == "execute":
+        return _run_ev(args, datasets, schedule, execute=True)
     return _run_report(args, datasets, schedule)
 
 
@@ -783,9 +799,13 @@ def _run_theta(
 
 
 def _run_ev(
-    args: argparse.Namespace, datasets: Sequence[HistoryDataset], schedule: SessionSchedule
+    args: argparse.Namespace,
+    datasets: Sequence[HistoryDataset],
+    schedule: SessionSchedule,
+    *,
+    execute: bool = False,
 ) -> int:
-    """EV-ядро R3: вероятности касания, `EV(τ)`, `τ*` и решение о входе."""
+    """EV-ядро R3: вероятности касания, `EV(τ)`, `τ*`, гейт и (по флагу) исполнение."""
     if args.bootstrap < 20:
         print("ошибка ввода: --bootstrap должен быть не меньше 20", file=sys.stderr)
         return EXIT_INPUT
@@ -837,6 +857,7 @@ def _run_ev(
     entries: List[Dict[str, object]] = []
     skipped: List[Dict[str, object]] = []
     flags: Dict[str, str] = {}
+    executions: List[ExecutionResult] = []
     for dataset in datasets:
         name = dataset.instrument.name
         try:
@@ -1042,6 +1063,52 @@ def _run_ev(
         if selection.reasons:
             flags[f"tau_star:{name}"] = "; ".join(selection.reasons)
 
+        if execute:
+            theta_ci = source.get("theta_ci") or [None, None]
+            theta_used = float(source.get("theta") or 0.0)
+            if (
+                isinstance(theta_ci, (list, tuple))
+                and len(theta_ci) == 2
+                and all(isinstance(item, (int, float)) and item > 0 for item in theta_ci)
+            ):
+                theta_lcb, theta_ubc = float(theta_ci[0]), float(theta_ci[1])
+            else:
+                theta_lcb = theta_ubc = theta_used
+                flags[f"theta_ci:{name}"] = "NO_THETA_CI: полоса по точечной θ"
+            regime_gate = bool(
+                regime is not None
+                and regime.survival is not None
+                and regime.survival.gate_passed
+            )
+            try:
+                executions.append(
+                    execute_policy(
+                        sessions,
+                        signals.signals,
+                        curve=curve,
+                        selection=selection,
+                        tau_max=tau_max,
+                        policy=policy,
+                        schedule=schedule,
+                        config=ExecutionConfig(
+                            instrument=name,
+                            tick_value=tick.value,
+                            sigma_p_ticks=sigma_p_ticks,
+                            cost_ticks=cost.round_trip_ticks,
+                            theta_lcb=theta_lcb,
+                            theta_ucb=theta_ubc,
+                            tau_liq=tau_liq,
+                            d_ticks=d_ticks,
+                            regime_gate=regime_gate,
+                            tp_ticks=barriers.tp_ticks,
+                            sl_ticks=barriers.sl_ticks,
+                            position_rub=args.position_rub,
+                        ),
+                    )
+                )
+            except ExecutionError as exc:
+                flags[f"execution:{name}"] = f"EXECUTION_FAILED: {exc}"
+
     allowed = sum(1 for entry in entries if entry["entry"]["allowed"])  # type: ignore[index]
     verdict = "PASS" if allowed else "NO_ENTRY"
     instruments_n = {str(entry["instrument"]): int(entry["bars"]) for entry in entries} or {
@@ -1243,6 +1310,9 @@ def _run_ev(
         ),
     )
 
+    if execute:
+        _write_execution_artifacts(args, executions, policy, trial.id, flags)
+
     _write(
         args.out / "ev.md",
         _format_ev(entries, skipped, trial.id, verdict, args.weeks),
@@ -1252,6 +1322,192 @@ def _run_ev(
         f"({allowed}/{len(entries)}); опыт: {trial.id}"
     )
     return EXIT_OK if verdict == "PASS" else EXIT_GATE
+
+
+def _write_execution_artifacts(
+    args: argparse.Namespace,
+    executions: Sequence[ExecutionResult],
+    policy,
+    trial_id: str,
+    flags: Dict[str, str],
+) -> None:
+    """Артефакты исполнения: журнал сделок, отказы, правило, полоса, триггеры."""
+    trades = [trade for result in executions for trade in result.trades]
+    no_trades = [item for result in executions for item in result.no_trades]
+    instruments_n = {
+        result.instrument: len(result.trades) for result in executions
+    } or {"instruments": 0}
+
+    _write(
+        args.out / "trade-log.json",
+        json.dumps(
+            build_artifact(
+                name="trade_log",
+                units={
+                    "gross_ticks": TICKS,
+                    "cost_ticks": TICKS,
+                    "net_ticks": TICKS,
+                    "horizon": MINUTES,
+                },
+                n=instruments_n,
+                method=(
+                    "Офлайн-исполнение бар за баром без look-ahead: вход по close сигнального "
+                    "бара, порядок проверок SL → TP → time stop → regime breaker → session → "
+                    "vol spike → model invalid → правило удержания §7; спред будущего момента "
+                    "не прогнозируется (NO_SPREAD_FORECAST)"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial_id,
+                    "trades": [trade.to_dict() for trade in trades],
+                    "exit_counts": {
+                        key: sum(result.exit_counts.get(key, 0) for result in executions)
+                        for key in {k for result in executions for k in result.exit_counts}
+                    },
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "no-trade.json",
+        json.dumps(
+            build_artifact(
+                name="no_trade_reports",
+                units={"count": COUNT},
+                n=instruments_n,
+                method="Отказы входа с причиной; пороги не ослабляются",
+                flags=flags,
+                payload={
+                    "trial_id": trial_id,
+                    "counts": {
+                        key: sum(result.no_trade_counts.get(key, 0) for result in executions)
+                        for key in {k for result in executions for k in result.no_trade_counts}
+                    },
+                    "reports": [item.to_dict() for item in no_trades],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "hold-rule.json",
+        json.dumps(
+            build_artifact(
+                name="hold_rule_config",
+                units={"ratio": RATIO, "lambda_risk": RATIO},
+                n=instruments_n,
+                method=(
+                    "Hold ⇔ m_rem − λ·s_rem > E[C_later] − C_now; m_rem и s_rem — эмпирика "
+                    "по 1m тем же протоколом, что EV; A_t ≤ 0 — выход (overshoot)"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial_id,
+                    "lambda_risk": round(policy.lambda_risk, 6),
+                    "z_entry": policy.z_entry,
+                    "rule": "m_rem − λ·s_rem > close-cost drift",
+                    "overshoot": "A_t ≤ 0",
+                    "vol_spike_multiplier": VOL_SPIKE_MULTIPLIER,
+                    "cusum_threshold": CUSUM_THRESHOLD,
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "online-band.json",
+        json.dumps(
+            build_artifact(
+                name="online_band_spec",
+                units={"ratio": RATIO, "horizon": MINUTES},
+                n=instruments_n,
+                method=(
+                    "A_0^LCB·e^{−θ_LCB t} − z_{1−α_check}·√(1 − e^{−2θ_UCB t}), "
+                    "α_check = α_total/n_checks, n_checks = τ_max/Δt (Бонферрони)"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial_id,
+                    "alpha_total": policy.alpha_total,
+                    "step_minutes": 1,
+                    "note": "σ_P берётся точечной оценкой R2 (NO_SIGMA_CI)",
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "exit-triggers.json",
+        json.dumps(
+            build_artifact(
+                name="exit_trigger_table",
+                units={"count": COUNT},
+                n=instruments_n,
+                method="Одиннадцать триггеров §9 с типами; TP и SL — разные причины журнала",
+                flags=flags,
+                payload={
+                    "trial_id": trial_id,
+                    "triggers": [spec.to_dict() for spec in EXIT_TRIGGERS],
+                    "closing": list(CLOSING_TRIGGERS),
+                    "reducing": list(REDUCING_TRIGGERS),
+                    "observed": sorted(
+                        {trade.exit_reason for trade in trades}
+                    ),
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "execute.md",
+        _format_execution(executions, trial_id),
+    )
+
+
+def _format_execution(executions: Sequence[ExecutionResult], trial_id: str) -> str:
+    lines = ["# R3 — офлайн-исполнение политики", ""]
+    lines.append(f"Опыт `{trial_id}`; инструментов: {len(executions)}.")
+    total = sum(len(result.trades) for result in executions)
+    lines.append(f"Сделок: {total}; отказов входа: {sum(len(r.no_trades) for r in executions)}.")
+    lines.append("")
+    if total:
+        lines.append(
+            "| Инструмент | Вход | Выход | τ план/факт | Причина | Gross | Cost | Net |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for result in executions:
+            for trade in result.trades:
+                lines.append(
+                    f"| {trade.instrument} | {trade.entry_ts} | {trade.exit_ts} "
+                    f"| {trade.tau_planned}/{trade.tau_actual} | {trade.exit_reason} "
+                    f"| {_fmt(trade.gross_ticks)} | {_fmt(trade.cost_ticks)} "
+                    f"| {_fmt(trade.net_ticks)} |"
+                )
+        lines.append("")
+        lines.append("Net — в тиках после круговых издержек.")
+    else:
+        lines.append("Ни одной сделки: входной гейт не прошёл ни на одном сигнале.")
+    lines.append("")
+    lines.append("## Отказы входа")
+    lines.append("")
+    counts: Dict[str, int] = {}
+    for result in executions:
+        for key, value in result.no_trade_counts.items():
+            counts[key] = counts.get(key, 0) + value
+    if counts:
+        lines.append("| Причина | Случаев |")
+        lines.append("|---|---|")
+        for key in sorted(counts):
+            lines.append(f"| `{key}` | {counts[key]} |")
+    else:
+        lines.append("Отказов не было.")
+    return "\n".join(lines)
 
 
 def _load_theta_upstream(
@@ -1286,6 +1542,7 @@ def _load_theta_upstream(
             "gate1": entry.get("gate1"),
             "reasons": entry.get("gate1_reasons") or [],
             "theta": entry.get("theta_used"),
+            "theta_ci": entry.get("theta_ci"),
             "t_half": entry.get("t_half_minutes"),
         }
     for entry in ou_payload.get("instruments") or []:

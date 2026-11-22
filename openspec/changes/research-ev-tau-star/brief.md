@@ -70,7 +70,6 @@ Gate 1 пройден 4/20, `θ` = 0.0053–0.0111 мин⁻¹, `t_{1/2}` = 62.6
 на минутном горизонте. Вердикт остаётся `NO_ENTRY` (0/4), `τ*` — по-прежнему на `τ_cap`.
 
 ## Фактические результаты волны 2
-
 Прогон `43a6385a6103` (`reports/research-wave2/`):
 
 | Инструмент | Gate 2 | γ | P_LCB | расхождение 10m | τ_regime | τ_liq | τ_session (медиана) | τ_model | τ_max |
@@ -93,6 +92,34 @@ Gate 1 пройден 4/20, `θ` = 0.0053–0.0111 мин⁻¹, `t_{1/2}` = 62.6
 4. **`τ_liq` = 1–8 мин** при позиции 200 тыс. ₽: медианный объём бара — сотни лотов, доля
    `ρ_max = 0.25` даёт единицы минут. Единицы объёма приняты в лотах
    (`ASSUMPTION:volume-in-lots`), разметка CSV этого не подтверждает.
+
+## Фактические результаты волн 3–4
+
+Прогон `5e975a663d38` (`reports/research-exec/`):
+
+| Артефакт | Содержимое |
+|---|---|
+| `trade-log.json` | 0 сделок: ни один сигнал не прошёл входной гейт |
+| `no-trade.json` | 7783 отказа, все с причиной `NO_TAU` |
+| `exit-triggers.json` | 11 триггеров; 9 закрывающих, 2 редукции (`mtf_confirmation`, `vol_spike`) |
+| `hold-rule.json` | `λ = 2/(2√2) = 0.707`, правило §7, `CUSUM` порог 4, `vol_spike` ×3 |
+| `online-band.json` | `α_total = 0.05`, `α_check = α_total/n_checks`, `n_checks = τ_max/Δt` |
+
+Пустой журнал — следствие волны 1: при `EV_LCB < 0` на всей сетке вход запрещён по §10, и
+ослаблять порог ради появления сделок нельзя. Машинерия исполнения проверена на синтетике:
+TP и SL (включая «SL первым» в одном баре), time stop, session exit, overshoot, `ANCHOR_EDGE`,
+`MODEL_INVALID`, блокировки `NO_TAU`/`SANITY`/`REGIME_CONFIDENCE`/`TAU_EXCEEDS_SESSION`/
+`POSITION_OPEN` — 13 тестов.
+
+Допущения, видимые в артефактах:
+
+- `NO_SPREAD_FORECAST`: спред будущего момента не прогнозируется, поэтому триггер
+  `close_cost_drift` в прогоне не срабатывает (разность издержек равна нулю).
+- `NO_SIGMA_CI`: интервал `σ_P` в R2 не строился, полоса валидности использует точечную
+  оценку; CI есть только у `θ` (он и подставляется в `θ_LCB`/`θ_UCB`).
+- `m_rem`, `s_rem` считаются эмпирически по тем же барам с прореживанием `stride = 5`
+  (иначе стоимость оценки на каждом баре удержания недопустима); при недостатке путей
+  правило возвращает `ESTIMATE_MISSING` и позиция закрывается, а не удерживается «по умолчанию».
 
 ## Принятые решения
 
@@ -159,17 +186,21 @@ Gate 1 пройден 4/20, `θ` = 0.0053–0.0111 мин⁻¹, `t_{1/2}` = 62.6
 | `analyzer/src/analyzer/research/pde.py` | **новый**: краевая задача OU, `REFERENCE_ONLY` |
 | `analyzer/src/analyzer/research/ev.py` | **новый**: `w`, `τ*`, `entry_decision` |
 | `analyzer/src/analyzer/research/regime.py` | HMM-15m, Gate 2, `γ_t`, выживание 10m |
-| `analyzer/src/analyzer/research/holding.py` | правило удержания, онлайн-полоса, выходы |
-| `analyzer/src/analyzer/research/policy_exec.py` | офлайн-исполнение, `trade_log` |
+| `analyzer/src/analyzer/research/holding.py` | правило удержания, онлайн-полоса, таблица 11 триггеров |
+| `analyzer/src/analyzer/research/policy_exec.py` | офлайн-исполнение, `trade_log`, `no_trade_reports` |
 | `analyzer/src/analyzer/research/units.py` | единицы `ticks^2`, `ticks/sqrt(min)`, `min^-1/2` |
-| `analyzer/src/analyzer/research/cli.py` | подкоманда `ev` (готово), затем `regime`, `execute` |
+| `analyzer/src/analyzer/research/cli.py` | подкоманды `ev`, `execute`, восемь артефактов R3 |
 | `analyzer/tests/test_research_first_passage.py` | 34 теста |
 | `analyzer/tests/test_research_pde.py` | 6 тестов, включая сверку с синтетикой |
-| `analyzer/tests/test_research_ev_cli.py` | 6 тестов подкоманды `ev` |
+| `analyzer/tests/test_research_tau_max.py` | 6 тестов |
+| `analyzer/tests/test_research_regime.py` | 16 тестов |
+| `analyzer/tests/test_research_holding.py` | 24 теста |
+| `analyzer/tests/test_research_policy_exec.py` | 13 тестов |
+| `analyzer/tests/test_research_ev_cli.py` | 8 тестов (`ev` и `execute`) |
 | `openspec/specs/research-validation/spec.md` | требования R3 (через дельту) |
 
 ## Статус актуальности
 
-Обновлено 2026-11-22 по факту волны 1: код, тесты и числа сверены с артефактами прогона
-`c407ec23b436`. Волны 2–4 не начаты; `τ_max` пока считается только по `τ_cap` и помечен
-флагом `TAU_MAX_INCOMPLETE`.
+Обновлено 2026-11-22 по факту всех четырёх волн: код, тесты и числа сверены с артефактами
+прогонов `43a6385a6103` (режим и `τ_max`) и `5e975a663d38` (исполнение). Открытых расхождений
+между кодом и документами изменения нет; `openspec validate --strict` — valid.

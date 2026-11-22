@@ -33,13 +33,14 @@ class SignalError(ValueError):
 
 @dataclass(frozen=True)
 class Signal:
-    """Вход: номер окна, индекс бара в окне, направление, отклонение в `σ_P`."""
+    """Вход: номер окна, индекс бара в окне, направление, отклонение в `σ_P`, якорь."""
 
     session: int
     index: int
     direction: int
     z: float
     price: float
+    anchor: float = 0.0
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -48,6 +49,7 @@ class Signal:
             "direction": self.direction,
             "z": round(self.z, 4),
             "price": round(self.price, 6),
+            "anchor": round(self.anchor, 6),
         }
 
 
@@ -165,6 +167,7 @@ def ou_signals(
                     direction=-1 if z > 0 else 1,
                     z=z,
                     price=float(close[index]),
+                    anchor=float(anchor[index]),
                 )
             )
     return SignalSet(

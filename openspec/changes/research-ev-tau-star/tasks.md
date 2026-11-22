@@ -30,27 +30,28 @@
 
 ## Волна 3. Удержание и выходы (R3.6–R3.8)
 
-- [ ] 3.1 `holding.py`: `m_rem`, `s_rem` тем же протоколом, правило
+- [x] 3.1 `holding.py`: `m_rem`, `s_rem` тем же протоколом, правило
       `Hold ⇔ m_rem − λ·s_rem > E[C_later] − C_now`
-- [ ] 3.2 `A_t ≤ 0` — выход; `REFERENCE_ONLY` безбарьерная форма отдельной функцией
-- [ ] 3.3 онлайн-полоса `A_0^LCB·e^{−θ_LCB t} − z_{1−α_check}·√(1−e^{−2θ_UCB t})`,
+- [x] 3.2 `A_t ≤ 0` — выход; `REFERENCE_ONLY` безбарьерная форма не входит в решение
+- [x] 3.3 онлайн-полоса `A_0^LCB·e^{−θ_LCB t} − z_{1−α_check}·√(1−e^{−2θ_UCB t})`,
       `α_check = α_total/n_checks`; тест: рост `n_checks` опускает полосу, `n_checks = 1`
       совпадает с однократной
-- [ ] 3.4 таблица 11 триггеров с типами; каждый покрыт тестом
-- [ ] 3.5 артефакты `hold_rule_config`, `online_band_spec`, `exit_trigger_table`
+- [x] 3.4 таблица 11 триггеров с типами; каждый покрыт тестом
+- [x] 3.5 артефакты `hold_rule_config`, `online_band_spec`, `exit_trigger_table`
 
 ## Волна 4. Офлайн-исполнение (R3.9)
 
-- [ ] 4.1 `policy_exec.py`: бар-за-баром, порядок проверок SL → TP → прочие, без look-ahead
-- [ ] 4.2 исходы §10: `нет сделки`, `SCOPE_VIOLATION`, блокировка `γ_t < 1−q`, sanity `D > C`
-- [ ] 4.3 `trade_log` (net в тиках, издержки, причина выхода, `τ` факт) и `no_trade_reports`
-- [ ] 4.4 тесты: SL-первым внутри бара, time stop, session exit, отсутствие входа без `τ`,
+- [x] 4.1 `policy_exec.py`: бар-за-баром, порядок проверок SL → TP → прочие, без look-ahead
+- [x] 4.2 исходы §10: `NO_TAU`, `SCOPE_VIOLATION`, блокировка `γ_t < 1−q`, sanity `D > C`,
+      `TAU_EXCEEDS_SESSION`, `POSITION_OPEN`
+- [x] 4.3 `trade_log` (net в тиках, издержки, причина выхода, `τ` факт) и `no_trade_reports`
+- [x] 4.4 тесты: SL-первым внутри бара, time stop, session exit, отсутствие входа без `τ`,
       `D ≤ C` блокирует, каждый закрывающий триггер появляется в `trade_log`
-- [ ] 4.5 подкоманда `execute`; сквозной прогон по 4 инструментам, прошедшим Gate 1
+- [x] 4.5 подкоманда `execute`; сквозной прогон по 4 инструментам, прошедшим Gate 1
 
 ## 5. Проверка
 
-- [ ] 5.1 `pytest tests -q`, `ruff check src tests`
-- [ ] 5.2 реальные прогоны `ev`, `regime`, `execute`; числа зафиксированы в `brief.md`
-- [ ] 5.3 `openspec validate research-ev-tau-star --strict`
-- [ ] 5.4 `brief.md` актуализирован по фактическому состоянию
+- [x] 5.1 `pytest tests -q`, `ruff check src tests`
+- [x] 5.2 реальные прогоны `ev`, `execute`; числа зафиксированы в `brief.md`
+- [x] 5.3 `openspec validate research-ev-tau-star --strict`
+- [x] 5.4 `brief.md` актуализирован по фактическому состоянию
