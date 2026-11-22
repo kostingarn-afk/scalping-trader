@@ -305,7 +305,10 @@ registry), `research/gate0a.py` (φ*(τ), вердикт, артефакт), п�
 
 ### Этап R2. Идентификация θ, σ, σ_P, ρ_model — **выполнен**
 
-Изменение: `openspec/changes/research-theta-gate1` (ревью и архивация — отдельными шагами).
+Архив: `openspec/changes/archive/2026-11-22-research-theta-gate1` (все задачи `[x]`);
+дельта требований слита в `openspec/specs/research-validation/spec.md` (10 требований добавлено).
+Три прохода ревью: ACCEPT_WITH_NOTES → ACCEPT_WITH_NOTES → ACCEPT_WITH_NOTES (правки внесены
+после каждого; открытых Major не осталось).
 Реализовано: `research/theta.py` (ACF-оценка, дисперсионная оценка, нулевая полоса,
 `evaluate_gate1`, `fit_ou`), подкоманда CLI `theta` (окно `--weeks`, `--escalate`), четыре
 артефакта `theta-invariance.json` / `signature-plot.json` / `null-band.json` / `ou-fit.json`.
