@@ -120,7 +120,7 @@ rejectReason, quantityLots)`: проверки идут в фиксирован�
 | 5 | Ожидаемая доходность | `ev_min_trades` = 50, оценка EV | `EV = p·avgWin − (1−p)·avgLoss` по закрытым сделкам; при `EV ≤ 0` отказ; нет оценки — правило не действует | `negative EV` |
 | 6 | Размер позиции | `max_loss_per_trade_pct` = 1.0, `kelly_cap_pct` = 1.0, оценка Келли | риск = `min(max_loss, kelly_cap_pct, Келли·100)`; без оценки Келли — только `max_loss`; `floor(deposit*risk/100 / \|entry-sl\| / lotSize)`; `< 1` → отказ | `position_size too small` |
 | 7 | Лимит номинала | `max_position_notional_pct` = 100.0 | `floor(deposit*pct/100 / (price*lotSize))`, объём **урезается**; `< 1` → отказ | `notional limit` |
-| 8 | Комиссионный фильтр | `commission_profit_ratio` = 3.0, `commission_rate_per_side` = 0.0005 | `\|tp-entry\|*units >= ratio*rate*entry*units*2` (порог 0.30 %); при `tp <= 0` пропускается | `commission filter` |
+| 8 | Комиссионный фильтр | `commission_profit_ratio` = 3.0, `commission_rate_per_side` = 0.0005 | цель должна лежать впереди входа (`sl < entry < tp` для покупки, `tp < entry < sl` для продажи), иначе отказ; `\|tp-entry\|*units >= ratio*rate*(entry+tp)*units` (круг по обеим ногам, порог 0.30 %); при `tp <= 0` пропускается | `commission filter` |
 
 Детали при чтении кода: rate-limit расходуется до расчёта объёма (отказ на шагах 5–7 всё равно
 занимает слот); депозит — константа `trader.deposit` (200 000 ₽), `correlation` всегда `0.0`; доливка
@@ -263,6 +263,11 @@ Flyway включён в `application.yml` (`enabled=true`, `locations=classpath
 меньше `ev_min_trades` закрытых сделок или односторонняя выборка — оценки нет. При `EV ≤ 0` сигнал
 отклоняется с причиной `negative EV` до расчёта объёма. Гейт начнёт действовать только после того,
 как закрытие сделок начнёт писаться в `trade_results` (§5.1 `to_do.md`, шаг 3.1).
+
+Разница между оценками: `KellyEstimator` пропускает сделки с нулевым PnL (они не дают ни прибыли,
+ни убытка для отношения `b`), `EvEstimator` считает их проигрышами (нулевой результат не окупает
+издержки). Поэтому при большом числе нулевых исходов порог выборки у двух оценок наступает в
+разные моменты — это намеренно, а не рассинхрон.
 
 Правка лимита — обычный `UPDATE`, применение в пределах polling-интервала:
 

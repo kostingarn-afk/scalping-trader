@@ -49,13 +49,21 @@ def test_order_imbalance_empty():
     assert compute_order_imbalance([], []) is None
 
 
-def test_vwap_basic():
+def test_vwap_uses_typical_price():
+    # H=10, L=8, C=9, V=100 → (10+8+9)/3 = 9
+    vwap = compute_vwap(np.array([10.0]), np.array([8.0]), np.array([9.0]), np.array([100]))
+
+    assert vwap == pytest.approx(9.0)
+
+
+def test_vwap_weights_by_volume():
     highs = np.array([10.0, 20.0])
     lows = np.array([8.0, 18.0])
-    vols = np.array([100, 100])
-    vwap = compute_vwap(highs, lows, vols)
-    assert vwap is not None
-    assert 8.0 <= vwap <= 20.0
+    closes = np.array([9.0, 19.0])
+    volumes = np.array([100, 300])
+
+    # typical: 9 и 19 → (9·100 + 19·300) / 400 = 16.5
+    assert compute_vwap(highs, lows, closes, volumes) == pytest.approx(16.5)
 
 
 def test_compute_all_returns_indicators():

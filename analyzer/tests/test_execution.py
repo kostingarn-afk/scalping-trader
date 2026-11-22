@@ -114,6 +114,60 @@ def test_negative_parameters_rejected() -> None:
 # --- прогон --------------------------------------------------------------------
 
 
+def test_participation_uses_volume_of_decision_bar() -> None:
+    """Участие оценивается по завершённому бару решения, а не по объёму бара исполнения."""
+    model = ExecutionModel(impact_bps_at_full=100.0)
+
+    def entry_price(decision_volume: int, fill_volume: int) -> float:
+        bars = [_bar(minute, volume=decision_volume) for minute in range(25)]
+        bars.append(
+            _bar(25, close=101.0, open_price=100.0, high=103.0, low=99.9, volume=fill_volume)
+        )
+        bars.extend(_bar(minute, volume=decision_volume) for minute in range(26, 31))
+        result = run_backtest(
+            bars=bars,
+            instrument=Instrument(ticker="SBER"),
+            config=RunConfig(
+                window=25, min_candles=25, commission_profit_ratio=0.001, execution=model
+            ),
+            commission=CommissionModel(tariff="trader"),
+            strategy_fn=_always_buy(),
+        )
+        return result.trades[0].entry_price
+
+    # Объём бара исполнения будущего не раскрывает: на цену входа он не влияет.
+    assert entry_price(1000, 1000) == pytest.approx(entry_price(1000, 100_000))
+    # А объём бара решения влияет: чем он меньше, тем выше участие и дороже вход.
+    assert entry_price(100, 1000) > entry_price(100_000, 1000)
+
+
+def test_participation_on_exit_uses_previous_bar_volume() -> None:
+    """Для выхода объём тоже берётся из завершённого бара, а не из бара закрытия."""
+    model = ExecutionModel(impact_bps_at_full=100.0)
+
+    def exit_price(decision_volume: int, exit_volume: int) -> float:
+        bars = [_bar(minute, volume=decision_volume) for minute in range(25)]
+        bars.append(
+            _bar(25, close=101.0, open_price=100.0, high=103.0, low=99.9, volume=exit_volume)
+        )
+        bars.extend(_bar(minute, volume=decision_volume) for minute in range(26, 31))
+        result = run_backtest(
+            bars=bars,
+            instrument=Instrument(ticker="SBER"),
+            config=RunConfig(
+                window=25, min_candles=25, commission_profit_ratio=0.001, execution=model
+            ),
+            commission=CommissionModel(tariff="trader"),
+            strategy_fn=_always_buy(),
+        )
+        return result.trades[0].exit_price
+
+    # Объём бара закрытия не влияет на цену выхода...
+    assert exit_price(1000, 1000) == pytest.approx(exit_price(1000, 100_000))
+    # ...а объём бара решения влияет: меньше объём → выше участие → продажа дешевле.
+    assert exit_price(100, 1000) < exit_price(100_000, 1000)
+
+
 def test_spread_worsens_entry_and_exit() -> None:
     baseline = _run(ExecutionModel())
     slipped = _run(ExecutionModel(spread_bps=10.0))

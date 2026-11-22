@@ -107,6 +107,35 @@ def test_parameters_line_marks_disabled_tp():
     assert "TP выключен" in report
 
 
+def test_parameters_line_prints_model_params():
+    """Оценённые параметры модели (θ/μ/σ, half-life) — результат прогона, а не только конфиг."""
+    result = replace(
+        _result((_trade(102.5, ExitReason.TAKE_PROFIT),)),
+        strategy_params=(("half_life", "12.5"), ("theta", "0.055")),
+    )
+
+    report = format_markdown([result])
+
+    assert "Параметры модели half_life=12.5, theta=0.055" in report
+
+
+def test_parameters_line_marks_first_run_when_params_differ():
+    """У каждого инструмента свои θ/μ/σ: шапка не должна выглядеть общей оценкой."""
+    first = replace(
+        _result((_trade(102.5, ExitReason.TAKE_PROFIT),)),
+        strategy_params=(("half_life", "12.5"),),
+    )
+    second = replace(
+        _result((_trade(102.5, ExitReason.TAKE_PROFIT),)),
+        label="ALRS",
+        strategy_params=(("half_life", "40.0"),),
+    )
+
+    report = format_markdown([first, second])
+
+    assert "Параметры модели (первый прогон) half_life=12.5" in report
+
+
 def test_summary_aggregates_trades():
     # TP: (102.5 − 100) × 10 = +25 gross, −5 комиссии = +20 net.
     # SL: (99 − 100) × 10 = −10 gross, −5 комиссии = −15 net.

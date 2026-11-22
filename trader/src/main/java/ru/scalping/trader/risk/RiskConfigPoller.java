@@ -8,6 +8,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import ru.scalping.trader.repository.TradeRepository;
 
+import java.util.Map;
+
 /**
  * Загрузка риск-параметров из таблицы {@code risk_config} в {@link RiskManager}
  * (spec risk-management: параметры настраиваются без передеплоя).
@@ -39,10 +41,15 @@ public class RiskConfigPoller {
      */
     @Scheduled(cron = "${trader.poll-risk-config-cron:*/30 * * * * *}")
     public void poll() {
+        Map<String, String> values = null;
         try {
-            riskManager.updateConfig(RiskConfig.fromMap(tradeRepository.loadRiskConfig()));
+            values = tradeRepository.loadRiskConfig();
+            riskManager.updateConfig(RiskConfig.fromMap(values));
         } catch (RuntimeException e) {
-            log.warn("Failed to load risk_config, keeping current configuration: {}", e.getMessage());
+            // Значение вне диапазона (например kelly_cap_pct вне 0.1–5.0) роняет разбор:
+            // без самих значений в логе причину не найти по одному тексту исключения.
+            log.warn("Failed to load risk_config, keeping current configuration: {} (loaded: {})",
+                    e.getMessage(), values);
         }
     }
 }

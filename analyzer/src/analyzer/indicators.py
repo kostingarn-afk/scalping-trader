@@ -120,11 +120,13 @@ def compute_atr_pct_series(
     return pct[np.isfinite(pct)]
 
 
-def compute_vwap(highs: np.ndarray, lows: np.ndarray, volumes: np.ndarray) -> Optional[float]:
-    """VWAP = sum(typical_price * volume) / sum(volume)."""
+def compute_vwap(
+    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, volumes: np.ndarray
+) -> Optional[float]:
+    """VWAP = sum(typical_price * volume) / sum(volume), typical = (H + L + C) / 3."""
     if volumes.sum() == 0:
         return None
-    typical = (highs + lows + np.roll(highs, 0)) / 3.0  # (H+L+C)/3, C берём как highs roll=0 заглушкой
+    typical = (highs + lows + closes) / 3.0
     return float((typical * volumes).sum() / volumes.sum())
 
 
@@ -154,7 +156,7 @@ def compute_all(
     bb_u, bb_m, bb_l = compute_bbands(closes)
     atr = compute_atr(highs, lows, closes)
     adx = compute_adx(highs, lows, closes)
-    vwap = compute_vwap(highs, lows, volumes)
+    vwap = compute_vwap(highs, lows, closes, volumes)
     imbalance = compute_order_imbalance(bids_qty or [], asks_qty or []) if bids_qty else None
     close = float(closes[-1]) if len(closes) else 0.0
     return Indicators(

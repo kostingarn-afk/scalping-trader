@@ -186,9 +186,10 @@ public class RiskManager {
             return RiskCheckResult.rejected("notional limit");
         }
 
-        // 7. Комиссионный фильтр: ожидаемая прибыль до TP должна покрыть ratio комиссий круга.
+        // 8. Комиссионный фильтр: ожидаемая прибыль до TP должна покрыть ratio комиссий круга.
         if (suggestedTp > 0
-                && !passesCommissionFilter(suggestedPrice, suggestedTp, quantityLots, lotSize, cfg)) {
+                && !passesCommissionFilter(
+                        suggestedPrice, suggestedSl, suggestedTp, quantityLots, lotSize, cfg)) {
             return RiskCheckResult.rejected("commission filter");
         }
 
@@ -210,11 +211,22 @@ public class RiskManager {
      *
      * <p>Ставка берётся из конфигурации, поэтому смена тарифа брокера не требует правки кода:
      * на «Инвесторе» (0.3 % за сторону) фильтр отсекает почти всё, на «Трейдере» — единицы.
+     *
+     * <p>Направление выводится из положения стопа: цель должна лежать впереди входа
+     * ({@code sl < entry < tp} для покупки, {@code tp < entry < sl} для продажи). Если порядок
+     * нарушен (гэп, устаревший сигнал), сделка отклоняется: прибыли «до TP» у неё нет.
+     * Круговая комиссия считается по обеим ногам — входу и цели, как в бэктесте.
      */
-    boolean passesCommissionFilter(double entry, double tp, int lots, int lotSize, RiskConfig cfg) {
+    boolean passesCommissionFilter(
+            double entry, double sl, double tp, int lots, int lotSize, RiskConfig cfg) {
+        boolean longSide = sl < entry;
+        boolean targetAhead = longSide ? tp > entry : tp < entry;
+        if (!targetAhead) {
+            return false;
+        }
         double units = (double) lots * lotSize;
         double profit = Math.abs(tp - entry) * units;
-        double roundTripCost = cfg.commissionRatePerSide() * entry * units * 2;
+        double roundTripCost = cfg.commissionRatePerSide() * (entry + tp) * units;
         return profit >= cfg.commissionProfitRatio() * roundTripCost;
     }
 

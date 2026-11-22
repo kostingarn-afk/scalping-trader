@@ -81,13 +81,14 @@ def test_commission_filter_matches_production_away_from_threshold(atr: float):
     assert actual is expected
 
 
-def test_filter_deviation_from_production_is_confined_to_threshold_band():
-    """Расхождение моделей существует и известно: только в узкой полосе у порога.
+def test_filters_agree_at_threshold_after_round_trip_alignment():
+    """Обе модели считают круг по обеим ногам, поэтому решения совпадают и у порога.
 
-    BUY: production-порог `ATR ≥ 0.009·P` = 2.43, бэктест — 2.452 → на 2.44 production
-    оставляет сигнал, бэктест отбрасывает.
-    SELL: production-порог тот же 2.43, бэктест — 2.408 → на 2.42 бэктест оставляет сигнал,
-    production отбрасывает.
+    Прежнее расхождение (production — по цене входа, бэктест — по входу и выходу) давало
+    полосу, где сигнал публиковался, но не исполнялся; после выравнивания её нет.
+
+    Порог investor: `ratio·rate·(P + TP)` при `rate = 0.003`; при `P = 270` и `TP = P + 2·2.43`
+    прибыль 4.86 против `3 · 0.003 · 544.86 = 4.9037` — отказ у обеих моделей.
     """
     price = 270.0
     instrument = Instrument("SBER", "TQBR", lot_size=1)
@@ -95,13 +96,13 @@ def test_filter_deviation_from_production_is_confined_to_threshold_band():
     production = CommissionFilter(ratio=3.0, rate_per_side=0.003)
     investor = CommissionModel("investor")
 
-    buy = Signal(SignalType.BUY, 0.8, price, price - 1.5 * 2.44, price + 2 * 2.44)
-    assert production.should_keep(buy, quantity=1) is True
-    assert passes_commission_filter(buy, price, instrument, investor, config) is False
+    below = Signal(SignalType.BUY, 0.8, price, price - 1.5 * 2.43, price + 2 * 2.43)
+    above = Signal(SignalType.BUY, 0.8, price, price - 1.5 * 2.60, price + 2 * 2.60)
 
-    sell = Signal(SignalType.SELL, 0.8, price, price + 1.5 * 2.42, price - 2 * 2.42)
-    assert production.should_keep(sell, quantity=1) is False
-    assert passes_commission_filter(sell, price, instrument, investor, config) is True
+    assert production.should_keep(below, quantity=1) is False
+    assert passes_commission_filter(below, price, instrument, investor, config) is False
+    assert production.should_keep(above, quantity=1) is True
+    assert passes_commission_filter(above, price, instrument, investor, config) is True
 
 
 def test_signal_without_stop_is_dropped_as_untradeable():

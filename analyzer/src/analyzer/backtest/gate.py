@@ -39,7 +39,6 @@ class GateMetrics:
     t_all: Optional[float]
     oos_trades: int
     t_oos: Optional[float]
-    net_rub: float
     net_trimmed_rub: float
     net_trimmed_pct: float
     days: int
@@ -58,7 +57,6 @@ def evaluate_gate(result: BacktestResult) -> GateMetrics:
 def evaluate_trades(trades: Sequence[Trade], deposit: float) -> GateMetrics:
     gross = sum(trade.gross_pnl for trade in trades)
     commission = sum(trade.commission for trade in trades)
-    net = sum(trade.net_pnl for trade in trades)
     gate = gross / commission if commission > 0 else None
 
     nets = [trade.net_pnl for trade in trades]
@@ -84,7 +82,6 @@ def evaluate_trades(trades: Sequence[Trade], deposit: float) -> GateMetrics:
         t_all=_t_stat(nets),
         oos_trades=len(oos_nets),
         t_oos=t_oos,
-        net_rub=net,
         net_trimmed_rub=trimmed,
         net_trimmed_pct=trimmed / deposit * 100.0 if deposit else 0.0,
         days=len(daily),
@@ -177,9 +174,9 @@ def format_gate_block(results: Sequence[BacktestResult]) -> List[str]:
         "",
         "## Гейт §1",
         "",
-        "| Прогон | Сделок | Gate | t OOS | Сделок OOS | Net без 3 лучших, ₽ "
+        "| Прогон | Сделок | Gate | t всего | t OOS | Сделок OOS | Net без 3 лучших, ₽ "
         "| ADF p | Ljung–Box p | JB p | Эксцесс | Вердикт |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for result in results:
         metrics = evaluate_gate(result)
@@ -190,7 +187,8 @@ def format_gate_block(results: Sequence[BacktestResult]) -> List[str]:
         )
         lines.append(
             f"| {result.run_name} | {metrics.trades} | {_number(metrics.gate)} | "
-            f"{_number(metrics.t_oos)} | {metrics.oos_trades} | "
+            f"{_number(metrics.t_all)} | {_number(metrics.t_oos)} | "
+            f"{metrics.oos_trades} | "
             f"{_money(metrics.net_trimmed_rub)} | {_p_value(metrics.adf_p)} | "
             f"{_p_value(metrics.ljung_box_p)} | {_p_value(metrics.jarque_bera_p)} | "
             f"{_kurtosis(metrics.excess_kurtosis)} | {verdict} |"
@@ -199,7 +197,8 @@ def format_gate_block(results: Sequence[BacktestResult]) -> List[str]:
         [
             "",
             "Порог: `gate ≥ 1`, `t OOS ≥ 2`, сделок ≥ 50, прибыль после удаления трёх лучших "
-            "дней положительна. OOS — последние 30 % периода по времени. ADF/Ljung–Box/JB — "
+            "дней положительна. OOS — последние 30 % периода по времени; `t всего` — по всей "
+            "выборке (показывает, значим ли результат вне OOS). ADF/Ljung–Box/JB — "
             "по дневным доходностям; JB не входит в вердикт (тяжёлые хвосты в скальпинге — норма).",
             "",
         ]

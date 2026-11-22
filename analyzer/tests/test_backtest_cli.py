@@ -1,6 +1,7 @@
 """Тесты CLI бэктеста на локальной выгрузке."""
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from analyzer.backtest.cli import _parse_msk_time, main
+from analyzer.backtest.cli import _parse_msk_time, _target_policy_config, main
+from analyzer.backtest.commission import CommissionModel
+from analyzer.backtest.models import Instrument, RunConfig
 
 START = datetime(2026, 11, 13, 7, 0, tzinfo=timezone.utc)
 
@@ -484,3 +487,43 @@ def test_parse_msk_time():
     for broken in ("1100", "11", "25:00", "11:70", "aa:bb"):
         with pytest.raises(ValueError):
             _parse_msk_time(broken)
+
+
+def test_target_policy_applies_to_walkforward_config():
+    """Walk-forward получает политику цели `k×ATR`, а не статическое 2×ATR (ревью, Major 1)."""
+    args = argparse.Namespace(atr_tp=None, no_tp=False)
+    config = RunConfig()
+    model = CommissionModel("trader")
+    instrument = Instrument("SBER", "TQBR", lot_size=1)
+
+    updated = _target_policy_config(args, config, model, instrument)
+
+    # Круг по обеим ногам: 2·3·0.0005/(1 − 3·0.0005) = 0.30045 %
+    assert updated.min_tp_pct == pytest.approx(0.300451, abs=1e-6)
+
+
+def test_target_policy_disabled_by_explicit_tp():
+    args = argparse.Namespace(atr_tp=2.0, no_tp=False)
+    config = RunConfig()
+
+    updated = _target_policy_config(
+        args, config, CommissionModel("trader"), Instrument("SBER")
+    )
+
+    assert updated.min_tp_pct == 0.0
+
+
+def test_target_policy_scales_with_tariff():
+    args = argparse.Namespace(atr_tp=None, no_tp=False)
+    config = RunConfig()
+
+    investor = _target_policy_config(
+        args, config, CommissionModel("investor"), Instrument("SBER")
+    )
+    future = _target_policy_config(
+        args, config, CommissionModel("trader"), Instrument("SiZ6", "SPBFUT")
+    )
+
+    assert investor.min_tp_pct == pytest.approx(1.816347, abs=1e-6)
+    # Фьючерсная ставка «Трейдера» — 0.0004 за сторону
+    assert future.min_tp_pct == pytest.approx(0.240288, abs=1e-6)

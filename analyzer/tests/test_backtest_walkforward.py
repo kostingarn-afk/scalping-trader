@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from typing import Dict, List
 
 import pytest
@@ -235,3 +236,51 @@ def test_markdown_lists_folds_and_out_of_sample():
 
 def test_markdown_without_results_reports_empty():
     assert "Прогонов нет" in format_walkforward_markdown([])
+
+
+def test_walkforward_carries_target_policy_into_result_and_report():
+    """Политика цели `k×ATR` видна в результате и в шапке: иначе прогон не отличить от прежних."""
+    result = run_walkforward(
+        bars=_bars(120),
+        instrument=INSTRUMENT,
+        config=replace(_config(), min_tp_pct=0.5),
+        commission=CommissionModel("trader"),
+        interval_minutes=1,
+        grid=[{"tp_width": 0.02}],
+        build_strategy=_builder(0.02),
+        train_bars=60,
+        test_bars=20,
+        min_train_trades=5,
+    )
+
+    report = format_walkforward_markdown([result])
+
+    assert result.min_tp_pct == pytest.approx(0.5)
+    assert "TP k×ATR от порога комиссии 0.50 %" in report
+
+
+def test_walkforward_reports_truncated_warmup():
+    """Прогрев короче `warmup` модели не должен оставаться незаметным."""
+
+    def build_with_warmup(params: Dict[str, float]):  # noqa: ANN001
+        strategy, label = _builder(0.02)(params)
+        strategy.warmup = 999  # больше длины train=60
+        return strategy, label
+
+    result = run_walkforward(
+        bars=_bars(120),
+        instrument=INSTRUMENT,
+        config=_config(),
+        commission=CommissionModel("trader"),
+        interval_minutes=1,
+        grid=[{"tp_width": 0.02}],
+        build_strategy=build_with_warmup,
+        train_bars=60,
+        test_bars=20,
+        min_train_trades=5,
+    )
+
+    report = format_walkforward_markdown([result])
+
+    assert result.truncated_folds
+    assert "Прогрев модели усечён" in report

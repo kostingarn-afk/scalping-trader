@@ -134,6 +134,7 @@ def run_backtest(
                         _close_trade(
                             position, bar, index, bar.close, ExitReason.DAILY_STOP,
                             instrument, model, cfg.execution,
+                            volume_ref=_known_volume(bar_list, index),
                         )
                     )
                     day_pnl += trades[-1].net_pnl
@@ -149,7 +150,7 @@ def run_backtest(
                 trades.append(
                     _close_trade(
                         position, bar, index, exit_price, reason, instrument, model,
-                        cfg.execution,
+                        cfg.execution, volume_ref=_known_volume(bar_list, index),
                     )
                 )
                 day_pnl += trades[-1].net_pnl
@@ -195,7 +196,7 @@ def run_backtest(
         start = max(0, index + 1 - cfg.window)
         # Окно модели шире окна индикаторов, когда у неё есть warmup; окно индикаторов
         # не меняется — иначе ATR/ADX (рекурсивные сглаживания) сдвинули бы правила.
-        lookback = max(cfg.window, _warmup(strategy_fn))
+        lookback = max(cfg.window, model_warmup(strategy_fn))
         _fit_model(strategy_fn, bar_list[max(0, index + 1 - lookback) : index + 1])
         indicators = compute_all(
             closes[start : index + 1],
@@ -241,10 +242,11 @@ def run_backtest(
         # Сайзинг считается по базовой цене, затем цена корректируется на издержки исполнения:
         # итерация «размер ↔ цена» даёт доли процента, а цикл усложняет движок.
         units = float(lots * instrument.lot_size)
-        fill_bar = bar_list[fill_index]
         side = 1.0 if signal.type is SignalType.BUY else -1.0
+        # Участие оценивается по объёму завершённого бара решения: объём бара исполнения
+        # к этому моменту ещё не сформирован.
         entry_price = cfg.execution.fill_price(
-            entry_price, side, units, fill_bar.volume, instrument.lot_size
+            entry_price, side, units, bar.volume, instrument.lot_size
         )
         position = _OpenPosition(
             direction=Direction.LONG if signal.type is SignalType.BUY else Direction.SHORT,
@@ -275,6 +277,7 @@ def run_backtest(
         skipped_by_ev=skipped_by_ev,
         label=label,
         strategy=strategy_name,
+        strategy_params=model_params(strategy_fn),
     )
 
 
@@ -342,12 +345,44 @@ def size_position(
     return lots, lots * notional_per_lot
 
 
-def _warmup(strategy_fn: StrategyFn) -> int:
+def model_warmup(strategy_fn: StrategyFn) -> int:
     """Сколько баров модель просит на оценку параметров (0 — правило без оценки)."""
     try:
         return max(0, int(getattr(strategy_fn, "warmup", 0) or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def model_params(strategy_fn: StrategyFn) -> Tuple[Tuple[str, str], ...]:
+    """Параметры модели для отчёта: `params()` приводится к строкам (JSON-совместимо).
+
+    Для правил без параметров — пустая последовательность. Оценённые параметры (θ, μ, σ,
+    половина жизни OU, состояние HMM) — результат прогона, а не только конфиг, поэтому
+    печатаются в шапке отчёта.
+    """
+    params = getattr(strategy_fn, "params", None)
+    if not callable(params):
+        return ()
+    try:
+        raw = params()
+    except (TypeError, ValueError):
+        return ()
+    if not raw:
+        return ()
+    return tuple(
+        (str(key), f"{value:.6g}" if isinstance(value, float) else str(value))
+        for key, value in raw.items()
+    )
+
+
+def _known_volume(bar_list: Sequence[Bar], index: int) -> int:
+    """Объём, известный на момент решения: предыдущий завершённый бар.
+
+    Объём бара, в котором исполняется заявка, к моменту решения ещё не сформирован; брать
+    его значило бы оценивать участие по будущему. Ноль (нет предыдущего бара) трактуется
+    моделью исполнения как полное участие — консервативно.
+    """
+    return bar_list[index - 1].volume if index > 0 else 0
 
 
 def _fit_model(strategy_fn: StrategyFn, bars: Sequence[Bar]) -> None:
@@ -421,12 +456,18 @@ def _close_trade(
     instrument: Instrument,
     model: CommissionModel,
     execution: ExecutionModel = ExecutionModel(),
+    volume_ref: int = 0,
 ) -> Trade:
     units = position.lots * instrument.lot_size
     direction = 1.0 if position.direction is Direction.LONG else -1.0
     # Закрытие длинной — продажа, короткой — покупка: поправка исполнения в сторону рынка.
+    # Объём для участия — известный на момент решения (предыдущий бар), а не объём бара выхода.
     filled_exit = execution.fill_price(
-        exit_price, -direction, units, bar.volume, instrument.lot_size
+        exit_price,
+        -direction,
+        units,
+        volume_ref,
+        instrument.lot_size,
     )
     gross = (filled_exit - position.entry_price) * units * direction
     cost = model.round_trip(
@@ -468,6 +509,7 @@ def _result(
     skipped_by_ev: int = 0,
     label: str = "",
     strategy: str = "",
+    strategy_params: Tuple[Tuple[str, str], ...] = (),
 ) -> BacktestResult:
     equity, drawdown = _equity_stats(trades, cfg.deposit)
     return BacktestResult(
@@ -486,6 +528,7 @@ def _result(
         skipped_by_ev=skipped_by_ev,
         label=label,
         strategy=strategy,
+        strategy_params=strategy_params,
     )
 
 

@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .commission import CommissionModel
-from .engine import StrategyFn, run_backtest
+from .engine import StrategyFn, model_warmup, run_backtest
 from .models import Bar, Instrument, RunConfig, Trade
 
 Params = Dict[str, float]
@@ -96,6 +96,9 @@ class FoldResult:
     test: TradeStats
     test_from: Optional[datetime] = None
     note: str = ""
+    # Предупреждение о прогреве: окно train короче `warmup` модели, поэтому оценка параметров
+    # на тесте отличается от одиночного прогона. Не влияет на `chosen` — кандидат найден.
+    warmup_note: str = ""
 
     @property
     def chosen(self) -> bool:
@@ -111,6 +114,9 @@ class WalkforwardResult:
     test_bars: int
     min_train_trades: int
     folds: Tuple[FoldResult, ...]
+    # Действующая политика цели: > 0 — `k×ATR` от порога комиссии, 0 — статическое кратное.
+    # Без этого числа нельзя отличить прогон от прежних отчётов.
+    min_tp_pct: float = 0.0
 
     @property
     def out_of_sample(self) -> TradeStats:
@@ -123,6 +129,11 @@ class WalkforwardResult:
     @property
     def run_name(self) -> str:
         return f"{self.instrument.name} {self.interval_minutes}min {self.tariff}"
+
+    @property
+    def truncated_folds(self) -> Tuple[FoldResult, ...]:
+        """Фолды, где прогрева не хватило на `warmup` модели."""
+        return tuple(fold for fold in self.folds if fold.warmup_note)
 
 
 def trades_from(trades: Sequence[Trade], since: datetime) -> List[Trade]:
@@ -220,10 +231,15 @@ def run_walkforward(
             continue
 
         train_stats, params, label = best
-        # Прогрев индикаторов: хвост train перед test, сделки из него не учитываются.
-        warmup = min(config.window, fold.test_start - fold.train_start)
-        test_slice = bar_list[fold.test_start - warmup : fold.test_end]
         strategy_fn, label = build_strategy(params)
+        # Прогрев индикаторов и оценка параметров: хвост train перед test, сделки из него
+        # не учитываются. Окно не меньше `warmup` модели — иначе OU/HMM оцениваются на
+        # усечённой истории и поведение отличается от одиночного прогона.
+        needed = max(config.window, model_warmup(strategy_fn))
+        available = fold.test_start - fold.train_start
+        truncated = available < needed
+        warmup = min(needed, available)
+        test_slice = bar_list[fold.test_start - warmup : fold.test_end]
         test_result = run_backtest(
             bars=test_slice,
             instrument=instrument,
@@ -236,6 +252,11 @@ def run_walkforward(
         )
         test_start_ts = bar_list[fold.test_start].ts
         test_trades = trades_from(test_result.trades, test_start_ts)
+        note = (
+            f"прогрев усечён до {warmup} баров вместо {needed} (train={available})"
+            if truncated
+            else ""
+        )
         results.append(
             FoldResult(
                 fold=fold,
@@ -243,6 +264,7 @@ def run_walkforward(
                 train=train_stats,
                 test=TradeStats.of(test_trades),
                 test_from=test_start_ts,
+                warmup_note=note,
             )
         )
 
@@ -254,6 +276,7 @@ def run_walkforward(
         test_bars=test_bars,
         min_train_trades=min_train_trades,
         folds=tuple(results),
+        min_tp_pct=config.min_tp_pct,
     )
 
 
@@ -264,6 +287,19 @@ def format_walkforward_markdown(
         return f"# {title}\n\nПрогонов нет: данные или сетка не заданы.\n"
 
     first = results[0]
+    # Политика цели зависит от тарифа, поэтому перечисляется по прогонам: без неё нельзя
+    # отличить `k×ATR` от прежнего статического кратного.
+    policies = sorted(
+        {
+            f"{result.tariff}: "
+            + (
+                f"TP k×ATR от порога комиссии {result.min_tp_pct:.2f} %"
+                if result.min_tp_pct > 0
+                else "TP по статическому кратному"
+            )
+            for result in results
+        }
+    )
     lines = [
         f"# {title}",
         "",
@@ -272,6 +308,7 @@ def format_walkforward_markdown(
             f"минимум сделок на train {first.min_train_trades}. Оценка — только сделки, "
             "открытые внутри тестового окна; хвост train используется как прогрев индикаторов."
         ),
+        "Цель: " + "; ".join(policies) + ".",
         "",
         "| Прогон | Окно | Train сделок | Train net ₽ | Параметры | Test сделок | Win % "
         "| Gross ₽ | Комиссия ₽ | Net ₽ | Гейт | t |",
@@ -313,6 +350,17 @@ def format_walkforward_markdown(
             "",
         ]
     )
+    truncated = [
+        f"{result.run_name}, окно {fold.fold.index}: {fold.warmup_note}"
+        for result in results
+        for fold in result.truncated_folds
+    ]
+    if truncated:
+        lines.extend(
+            ["Прогрев модели усечён (оценка параметров на тесте отличается от одиночного прогона):"]
+            + [f"- {item}" for item in truncated]
+            + [""]
+        )
     return "\n".join(lines)
 
 

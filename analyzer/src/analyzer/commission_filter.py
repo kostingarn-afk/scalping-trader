@@ -17,9 +17,9 @@ class CommissionFilter:
     # Дефолт — «Трейдер»: порог 0.30 % вместо 1.8 % (шаг 1.9).
     rate_per_side: float = 0.0005
 
-    def estimate_commission(self, price: float, quantity: int) -> float:
-        """Круговая комиссия: ставка брокера за сторону × две стороны."""
-        return self.rate_per_side * price * quantity * 2  # вход + выход
+    def estimate_commission(self, price: float, tp: float, quantity: int) -> float:
+        """Круговая комиссия: ставка за сторону × (вход + выход)."""
+        return self.rate_per_side * (price + tp) * quantity
 
     def estimate_profit(self, signal: Signal, quantity: int) -> float:
         """Ожидаемая прибыль = |TP - entry| × quantity."""
@@ -31,6 +31,11 @@ class CommissionFilter:
         """True — сигнал проходит фильтр, False — отбрасывается."""
         if signal.type == SignalType.HOLD:
             return False
-        commission = self.estimate_commission(signal.suggested_price, quantity)
+        # Без цели прибыли нет — стоимость круга считать нечего.
+        if signal.suggested_tp is None:
+            return False
+        commission = self.estimate_commission(
+            signal.suggested_price, signal.suggested_tp, quantity
+        )
         profit = self.estimate_profit(signal, quantity)
         return profit >= self.ratio * commission

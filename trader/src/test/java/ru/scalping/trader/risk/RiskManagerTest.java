@@ -138,6 +138,33 @@ class RiskManagerTest {
     }
 
     @Test
+    void commissionFilterRejectsTargetBehindEntry() {
+        RiskManager rm = new RiskManager();
+        // SL ниже входа (покупка), TP тоже ниже: цель позади входа, прибыли «до TP» нет.
+        RiskCheckResult result = rm.check("SBER", 100.0, 99.0, 98.0, 1, 200_000, 0.0);
+
+        assertThat(result.allowed()).isFalse();
+        assertThat(result.rejectReason()).contains("commission filter");
+    }
+
+    @Test
+    void commissionFilterAcceptsShortGeometry() {
+        RiskManager rm = new RiskManager();
+        // SL выше входа, TP ниже — короткая позиция; порядок уровней согласован.
+        assertThat(rm.check("SBER", 100.0, 101.0, 98.0, 1, 200_000, 0.0).allowed()).isTrue();
+    }
+
+    @Test
+    void commissionFilterCountsRoundTripOnBothLegs() {
+        RiskManager rm = new RiskManager();
+        // Расстояние 0.4 % при ставке 0.05 %: круг = 0.1 % от суммы, ratio 3 → нужно 0.3 %.
+        // 0.4 % проходит; расчёт «только по входу» дал бы тот же ответ, поэтому проверяем
+        // границу, где выход заметно дороже входа: цель 101.0 при входе 100.0.
+        assertThat(rm.check("SBER", 100.0, 99.0, 100.4, 1, 200_000, 0.0).allowed()).isTrue();
+        assertThat(rm.check("SBER", 100.0, 99.0, 100.2, 1, 200_000, 0.0).allowed()).isFalse();
+    }
+
+    @Test
     void evMinTradesOutsideRangeIsRejected() {
         assertThatThrownBy(() -> new RiskConfig(1.0, 3.0, 3.0, 3, 10, 0.8, 10, 660, 0.0005,
                 100.0, 1.0, 0))

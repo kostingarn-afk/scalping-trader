@@ -1,4 +1,4 @@
-"""Тесты комиссионного фильтра — задача 3.5."""
+﻿"""Тесты комиссионного фильтра — задача 3.5."""
 from __future__ import annotations
 
 import pytest
@@ -31,12 +31,12 @@ def test_commission_estimate():
     # Ставка задана явно: дефолт — «Трейдер» 0.0005, а тест проверяет арифметику «Инвестора».
     f = CommissionFilter(ratio=3.0, rate_per_side=0.003)
     # 0.3% * 100 * 1 * 2 (вход+выход) = 0.6
-    assert abs(f.estimate_commission(100.0, 1) - 0.6) < 1e-9
+    assert abs(f.estimate_commission(100.0, 100.0, 1) - 0.6) < 1e-9
 
 
 def test_default_tariff_is_trader():
     """Дефолт фильтра совпадает с дефолтом конфига Analyzer: «Трейдер» (шаг 1.9)."""
-    assert CommissionFilter().estimate_commission(100.0, 1) == pytest.approx(0.1)
+    assert CommissionFilter().estimate_commission(100.0, 100.0, 1) == pytest.approx(0.1)
 
 
 def test_commission_estimate_uses_configured_tariff():
@@ -44,9 +44,9 @@ def test_commission_estimate_uses_configured_tariff():
     investor = CommissionFilter(ratio=3.0, rate_per_side=0.003)
     trader = CommissionFilter(ratio=3.0, rate_per_side=0.0005)
 
-    assert trader.estimate_commission(100.0, 1) == pytest.approx(0.1)
-    assert trader.estimate_commission(100.0, 1) * 6 == pytest.approx(
-        investor.estimate_commission(100.0, 1)
+    assert trader.estimate_commission(100.0, 100.0, 1) == pytest.approx(0.1)
+    assert trader.estimate_commission(100.0, 100.0, 1) * 6 == pytest.approx(
+        investor.estimate_commission(100.0, 100.0, 1)
     )
 
 
@@ -56,3 +56,10 @@ def test_signal_rejected_on_investor_but_kept_on_trader():
 
     assert not CommissionFilter(rate_per_side=0.003).should_keep(sig)
     assert CommissionFilter(rate_per_side=0.0005).should_keep(sig)
+
+
+def test_signal_without_target_is_rejected():
+    """Без цели прибыли нет: стоимость круга считать не от чего."""
+    sig = Signal(SignalType.BUY, 0.8, 100.0, 99.0, None)
+
+    assert not CommissionFilter().should_keep(sig)

@@ -90,10 +90,21 @@ class TestRequiredTpPct:
         config = AnalyzerConfig()
 
         assert config.commission_rate_per_side == pytest.approx(0.0005)
-        # ratio 3 × 2 стороны × 0.0005 → 0.30 %
-        assert config.required_tp_pct == pytest.approx(0.30)
+        # Круг по обеим ногам: 2·ratio·rate/(1 − ratio·rate) = 0.30045 %
+        assert config.required_tp_pct == pytest.approx(0.300451, abs=1e-6)
 
     def test_investor_threshold_is_wider(self):
         config = AnalyzerConfig(commission_rate_per_side=0.003)
 
-        assert config.required_tp_pct == pytest.approx(1.80)
+        assert config.required_tp_pct == pytest.approx(1.816347, abs=1e-6)
+
+    def test_invalid_rate_is_rejected(self):
+        # Ноль отключил бы и порог цели, и комиссионный фильтр молча.
+        with pytest.raises(ValueError, match="commission_rate_per_side"):
+            AnalyzerConfig(commission_rate_per_side=0.0)
+        with pytest.raises(ValueError, match="commission_rate_per_side"):
+            AnalyzerConfig(commission_rate_per_side=0.5)
+
+    def test_invalid_ratio_is_rejected(self):
+        with pytest.raises(ValueError, match="commission_profit_ratio"):
+            AnalyzerConfig(commission_profit_ratio=0.0)

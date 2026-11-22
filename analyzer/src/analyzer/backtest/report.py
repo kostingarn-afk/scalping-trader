@@ -208,6 +208,15 @@ def _parameters_line(results: Sequence[BacktestResult]) -> str:
     strategy = results[0].strategy
     if strategy:
         line = f"Стратегия: **{strategy}**. " + line
+    params = results[0].strategy_params
+    if params:
+        # Параметры оцениваются на окне каждого инструмента, поэтому при разных значениях
+        # в шапку попадает только первый прогон — с явной пометкой, чтобы не выглядело общим.
+        same = all(result.strategy_params == params for result in results)
+        prefix = "" if same else "(первый прогон) "
+        line += f" Параметры модели {prefix}" + ", ".join(
+            f"{key}={value}" for key, value in params
+        ) + "."
     return line
 
 
@@ -265,7 +274,13 @@ def _exits_block(results: Sequence[BacktestResult]) -> List[str]:
                 continue
             net = sum(trade.net_pnl for trade in group)
             wins = sum(1 for trade in group if trade.is_win)
-            share = f"{net / total_net * 100:.0f}" if total_net else "—"
+            # Доля от итога не определена, когда итог близок к нулю: проценты в тысячи
+            # сбивают с толку сильнее, чем прочерк.
+            share = (
+                f"{net / total_net * 100:.0f}"
+                if abs(total_net) >= 1.0
+                else "—"
+            )
             rows.append(
                 f"| {result.run_name} | {reason.value} | {len(group)} | "
                 f"{wins / len(group) * 100:.1f} | {_money(net)} | {share} |"

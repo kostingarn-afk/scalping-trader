@@ -168,6 +168,12 @@ class RunConfig:
             raise ValueError("max_position_notional_pct must be in (0, 1000]")
         if self.atr_mult_sl <= 0 or self.atr_mult_tp <= 0:
             raise ValueError("ATR multipliers must be positive")
+        if self.min_tp_pct < 0:
+            raise ValueError("min_tp_pct must not be negative")
+        if self.min_tp_pct > 100:
+            # Порог больше 100 % не покрывается минутным движением: цель недостижима,
+            # и такая конфигурация должна падать, а не давать пустой прогон.
+            raise ValueError("min_tp_pct must not exceed 100")
         if self.max_bars_in_trade < 1:
             raise ValueError("max_bars_in_trade must be at least 1")
         if self.min_candles < 1:
@@ -212,6 +218,9 @@ class BacktestResult:
     label: str = ""
     # Правило входа: `mean_reversion` (production) или `v2`; печатается в шапке отчёта.
     strategy: str = ""
+    # Оценённые параметры модели (θ, μ, σ, половина жизни OU, состояние HMM): результат
+    # прогона, а не только конфиг. Строки — для markdown-отчёта (в JSON-сводку не входят).
+    strategy_params: Tuple[Tuple[str, str], ...] = ()
 
     @property
     def starting_deposit(self) -> float:

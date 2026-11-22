@@ -50,15 +50,28 @@ class AnalyzerConfig:
             raise ValueError("hawkes_window must be at least 50")
         if self.hawkes_refresh <= 0:
             raise ValueError("hawkes_refresh must be positive")
+        # Ставка и ratio задают порог цели выхода и комиссионный фильтр: ноль или минус
+        # отключают фильтр молча (все сигналы проходят), поэтому проверяются явно.
+        if not 0 < self.commission_rate_per_side <= 0.01:
+            raise ValueError("commission_rate_per_side must be in (0, 0.01]")
+        if self.commission_profit_ratio <= 0:
+            raise ValueError("commission_profit_ratio must be positive")
+        if self.signal_ttl_seconds <= 0:
+            raise ValueError("signal_ttl_seconds must be positive")
 
     @property
     def required_tp_pct(self) -> float:
-        """Порог цели выхода, % от суммы сделки: `ratio × 2 × ставка` (шаг 1.9).
+        """Порог цели выхода, % от суммы сделки (шаг 1.9).
 
         Цель должна покрывать хотя бы столько, иначе комиссионный фильтр отбросит сигнал;
         фактическое кратное ATR считает `strategy.target_mult`.
+
+        Круг считается по обеим ногам: `d ≥ ratio·rate·(entry + tp)`, откуда при `tp = entry·(1+d)`
+        получаем `d/entry ≥ 2·ratio·rate/(1 − ratio·rate)`. Формула «2·ratio·rate» без знаменателя
+        недобирает ровно на член, которым выход дороже входа, и цель на пороге отбраковывалась.
         """
-        return self.commission_profit_ratio * 2 * self.commission_rate_per_side * 100.0
+        ratio_rate = self.commission_profit_ratio * self.commission_rate_per_side
+        return 2.0 * ratio_rate / (1.0 - ratio_rate) * 100.0
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "AnalyzerConfig":

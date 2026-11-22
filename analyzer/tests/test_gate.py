@@ -213,6 +213,7 @@ def test_gate_block_present_in_report():
 
     assert "## Гейт §1" in report
     assert "Gate" in report
+    assert "t всего" in report
     assert "пройден" in report
 
 

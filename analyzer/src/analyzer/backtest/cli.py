@@ -66,7 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="таймфрейм выгрузки, мин (по умолчанию — из .meta.json, иначе 1)",
     )
-    parser.add_argument("--intervals", default="1,5,15", help="целевые таймфреймы через запятую")
+    parser.add_argument(
+        "--intervals",
+        default="1",
+        help=(
+            "целевые таймфреймы через запятую (по умолчанию торговый 1min); "
+            "5/15 — только если преимущество доказано, 1h и выше — анализ"
+        ),
+    )
     parser.add_argument(
         "--tariffs",
         default="investor",
@@ -524,6 +531,23 @@ def _parse_tariffs(value: str) -> List[str]:
     return tariffs
 
 
+def _target_policy_config(
+    args: argparse.Namespace,
+    config: RunConfig,
+    model: CommissionModel,
+    instrument: Instrument,
+) -> RunConfig:
+    """Конфиг для walk-forward: там TP не задаётся явно.
+
+    Явный `--atr-tp` — статическая цель (перебор множителя); иначе действует политика
+    `k×ATR` от порога комиссии тарифа, как в одиночном прогоне и production.
+    Панель считает собственный PnL и политику не применяет.
+    """
+    if args.atr_tp is not None or args.no_tp:
+        return config
+    return replace(config, min_tp_pct=_required_tp_pct(config, model, instrument))
+
+
 def _run_config_for(
     config: RunConfig,
     tp: Optional[float],
@@ -539,13 +563,14 @@ def _run_config_for(
 
 
 def _required_tp_pct(config: RunConfig, model: CommissionModel, instrument: Instrument) -> float:
-    """Порог цели выхода, % от суммы сделки, по тарифу и классу инструмента."""
-    return (
-        config.commission_profit_ratio
-        * 2
-        * model.per_side_rate(instrument.is_future)
-        * 100.0
-    )
+    """Порог цели выхода, % от суммы сделки, по тарифу и классу инструмента.
+
+    Круг считается по обеим ногам (`ratio·rate·(entry + tp)`), поэтому порог —
+    `2·ratio·rate/(1 − ratio·rate)`: без знаменателя цель ровно на пороге отбраковывалась
+    собственным фильтром прогона.
+    """
+    ratio_rate = config.commission_profit_ratio * model.per_side_rate(instrument.is_future)
+    return 2.0 * ratio_rate / (1.0 - ratio_rate) * 100.0
 
 
 def _parse_variants(
@@ -763,12 +788,13 @@ def _run_walkforward(
                 return 2
             for tariff in tariffs:
                 try:
+                    model = _commission_model(args, tariff)
                     results.append(
                         run_walkforward(
                             bars=bars,
                             instrument=dataset.instrument,
-                            config=config,
-                            commission=_commission_model(args, tariff),
+                            config=_target_policy_config(args, config, model, dataset.instrument),
+                            commission=model,
                             interval_minutes=interval,
                             grid=settings["grid"],  # type: ignore[arg-type]
                             build_strategy=builder,
