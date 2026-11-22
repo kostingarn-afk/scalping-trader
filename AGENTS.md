@@ -241,4 +241,4 @@ openspec archive <change-id>                    # после ревью; --yes �
 - Перед изменением кода читай `openspec/changes/archive/2026-11-11-scalping-trading-system-mvp/design.md` — там обоснование решений.
 - Новые изменения оформляй отдельным change в `openspec/changes/`; правки требований → `specs/`, правки задач → `tasks.md` — через `/opsx-continue` или вручную.
 - После реализации — `openspec validate <change-id>`, затем `/opsx-archive`.
-- `brief.md` (контекст изменения) — не создавался; заведение — отдельная задача.
+- `brief.md` (контекст изменения) в архиве `2026-11-11-scalping-trading-system-mvp` не создавался — это историческое состояние того изменения, а не правило: для новых изменений `brief.md` обязателен (глобальные инструкции).

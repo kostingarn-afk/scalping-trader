@@ -42,8 +42,8 @@ Gate 0a пройден 19/20, окупаемость наступает при �
   (идентифицируется только `A·θ`), минимум лежит на границе сетки: `identified = False`,
   Gate 1 не проходит. Значение на границе — предел перебора, а не оценка.
 - **Расхождение оценок — флаг, а не блокер.** ACF смещена вверх, дисперсионная вниз
-  (на данных отношение достигает 2.9); блокировать по разнице двух смещённых оценок значило бы
-  задать порог «на глаз». Блокирует полоса.
+  (на данных отношение достигает 13.7× у IRAO, выше 1.5× у 7 инструментов); блокировать
+  по разнице двух смещённых оценок значило бы задать порог «на глаз». Блокирует полоса.
 - **`θ_used` для OU — дисперсионная оценка**, если она идентифицирована.
 - **Артефакты разделены по смыслу:** `theta-invariance.json`, `signature-plot.json`,
   `null-band.json`, `ou-fit.json` — каждый в конверте с единицами, `n`, методом и флагами;
@@ -108,7 +108,7 @@ bootstrap 200, нулевая полоса 100 (2.5–97.5 перцентили)
   пропуски/границы окон/дубли, дедупликация Δ, плато, CI-границы Gate 1, пустая полоса.
 - `pytest tests/test_research_cli.py` — раздельные артефакты, окно оценки, сквозной прогон с
   `registry_id`, конфликт флагов, коды возврата, ряд без окон.
-- `pytest tests -q` (557 тестов), `ruff check src tests`.
+- `pytest tests -q` (559 тестов), `ruff check src tests`.
 - Реальные прогоны: базовый (68 с) и `--escalate` (72 с) на 20 инструментах;
   `openspec validate research-theta-gate1 --strict`.
 
@@ -133,11 +133,14 @@ bootstrap 200, нулевая полоса 100 (2.5–97.5 перцентили)
 |---|---|
 | `analyzer/src/analyzer/research/theta.py` | ACF-оценка, дисперсионная оценка, нулевая полоса, `evaluate_gate1`, `fit_ou` |
 | `analyzer/src/analyzer/research/cli.py` | подкоманда `theta`, окно `--weeks`, четыре артефакта, `registry_id`, `SUGGEST_ESCALATION` |
-| `analyzer/src/analyzer/research/units.py` | единица `log_price` для `μ` |
+| `analyzer/src/analyzer/research/units.py` | единицы `log_price`, `log_price/sqrt(min)`, `log_returns`, `log2_returns`; закрытый список дополнен |
+| `analyzer/src/analyzer/research/artifacts.py` | `validate_artifact` сверяет единицы артефакта с `ALLOWED_UNITS` |
 | `analyzer/tests/test_research_theta.py` | 37 тестов |
-| `analyzer/tests/test_research_cli.py` | 7 тестов подкоманды `theta` (13 в файле), включая сквозной прогон |
+| `analyzer/tests/test_research_cli.py` | 14 тестов (7 из них — подкоманда `theta`), включая сквозной прогон |
+| `analyzer/tests/test_research_artifacts.py` | 6 тестов, включая отказ на неизвестной единице |
 | `openspec/changes/research-theta-gate1/specs/research-validation/spec.md` | требования θ, полосы, Gate 1, артефактов (сольются в живую спеку при архивации) |
 
 ## Статус актуальности
 
-Сверено с кодом и артефактами прогонов на 2026-11-22 (проход ревью 1 — правки внесены).
+Сверено с кодом и артефактами прогонов на 2026-11-22 после трёх проходов ревью
+(`bda1fd928038` — окно 8 недель, `2c4d9ebdd424` — эскалация). Открытых расхождений с кодом нет.

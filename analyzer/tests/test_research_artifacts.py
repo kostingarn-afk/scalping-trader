@@ -49,6 +49,19 @@ def test_empty_flags_allowed_but_mapping_required():
         validate_artifact({"units": UNITS, "n": N, "method": "m", "flags": "none"})
 
 
+def test_unknown_unit_rejected():
+    """Опечатка в единицах (`tick` вместо `ticks`) не должна проходить молча."""
+    with pytest.raises(ArtifactError, match="unknown units"):
+        build_artifact(
+            name="report",
+            units={"price": "tick"},
+            n=N,
+            method="Parkinson",
+            flags=FLAGS,
+            payload={},
+        )
+
+
 def test_collect_flags_keeps_first_value():
     merged = collect_flags({"tick": "UNVERIFIED"}, {"tick": "OK"}, {"spread": "UNVERIFIED"})
 

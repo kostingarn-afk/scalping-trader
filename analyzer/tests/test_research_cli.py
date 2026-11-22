@@ -371,3 +371,41 @@ def test_theta_continues_when_one_instrument_has_no_sessions(tmp_path: Path):
     assert signature["payload"]["instruments"][0]["points"] == []
     ou = json.loads((out / "ou-fit.json").read_text(encoding="utf-8"))
     assert ou["payload"]["instruments"] == []
+
+
+def test_theta_ou_flags_reach_artifact_envelope(tmp_path: Path, monkeypatch):
+    """Флаги OU-параметров обязаны попадать в конверт, а не теряться в payload."""
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_ou_dataset(data)
+    out = tmp_path / "out"
+
+    class _StubOuFit:
+        flags = {"sigma": "LOW_CONFIDENCE: тестовая заглушка"}
+
+        def to_dict(self):
+            return {"instrument": "TEST@TQBR", "flags": dict(self.flags)}
+
+    monkeypatch.setattr("analyzer.research.cli.fit_ou", lambda *args, **kwargs: _StubOuFit())
+
+    code = main(
+        [
+            "theta",
+            "--data-dir",
+            str(data),
+            "--out",
+            str(out),
+            "--registry",
+            str(tmp_path / "registry.jsonl"),
+            "--bootstrap",
+            "20",
+            "--null-reps",
+            "50",
+            "--weeks",
+            "0",
+        ]
+    )
+
+    assert code == 0
+    ou = json.loads((out / "ou-fit.json").read_text(encoding="utf-8"))
+    assert ou["flags"]["sigma:TEST@TQBR"] == "LOW_CONFIDENCE: тестовая заглушка"
