@@ -841,11 +841,6 @@ def _run_ev(
         price = _median_price(bars)
         sigma_ticks = float(source["sigma"]) * price / tick.value
         sigma_p_ticks = float(source["sigma_p"]) * price / tick.value
-        try:
-            barriers = declare_barriers(sigma_ticks, policy)
-        except PolicyError as exc:
-            skipped.append({"instrument": name, "reason": f"POLICY: {exc}"})
-            continue
         cost = estimate_cost(
             price,
             tick,
@@ -853,6 +848,13 @@ def _run_ev(
             spread_bps=args.spread_bps,
             spread_verified=args.spread_verified,
         )
+        try:
+            barriers = declare_barriers(
+                sigma_ticks, policy, cost_ticks=cost.round_trip_ticks
+            )
+        except PolicyError as exc:
+            skipped.append({"instrument": name, "reason": f"POLICY: {exc}"})
+            continue
         sessions = session_ohlcv(bars, schedule)
         try:
             signals = ou_signals(
@@ -890,8 +892,10 @@ def _run_ev(
         # τ_max из семи компонентов — шаг R3.2; пока гейт работает по τ_cap, и это видно в флагах.
         decision = entry_decision(curve, selection, tau_max=policy.tau_cap_minutes)
         # §3 holding_exiting.md: EV ≤ a − Cost, поэтому a ≤ Cost исключает положительный EV
-        # при любых вероятностях. Это sanity-проверка (не гейт): она объясняет вердикт.
+        # при любых вероятностях. §2 требует a ≤ D = A_0·σ_P: барьер выше стационарного
+        # масштаба — уже не mean reversion. Оба условия диагностические, не гейты.
         bound = barriers.tp_ticks - cost.round_trip_ticks
+        d_ticks = policy.z_entry * sigma_p_ticks
 
         entries.append(
             {
@@ -914,7 +918,12 @@ def _run_ev(
                 "sanity": {
                     "max_ev_upper_bound": round(bound, 6),
                     "viable": bool(bound > 0),
-                    "rule": "EV ≤ a − Cost: при a ≤ Cost положительный EV невозможен",
+                    "d_ticks": round(d_ticks, 6),
+                    "a_le_d": bool(barriers.tp_ticks <= d_ticks),
+                    "rule": (
+                        "EV ≤ a − Cost: при a ≤ Cost положительный EV невозможен; "
+                        "§2 требует a ≤ D = z_entry·σ_P"
+                    ),
                 },
                 "signals": signals.to_dict(),
                 "curve_meta": {
@@ -942,6 +951,16 @@ def _run_ev(
             flags[f"sanity:{name}"] = (
                 f"NEGATIVE_BOUND: TP={barriers.tp_ticks} тиков ≤ Cost="
                 f"{cost.round_trip_ticks:.2f} — EV > 0 невозможно при любых p"
+            )
+        if barriers.tp_ticks > d_ticks:
+            flags[f"barrier:{name}"] = (
+                f"ABOVE_D: TP={barriers.tp_ticks} > D={d_ticks:.2f} тиков "
+                "(z_entry·σ_P) — это не mean reversion"
+            )
+        if barriers.floor_applied:
+            flags[f"barrier_floor:{name}"] = (
+                f"COST_FLOOR: TP={barriers.tp_ticks} = ceil({policy.k_cost}·"
+                f"Cost={cost.round_trip_ticks:.2f})"
             )
         flags[f"signal:{name}"] = "PROVISIONAL_SIGNAL"
         flags[f"tau_max:{name}"] = "TAU_MAX_INCOMPLETE: только tau_cap (R3.2)"

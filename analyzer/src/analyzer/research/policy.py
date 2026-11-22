@@ -44,6 +44,7 @@ class PolicyParams:
     buffer_minutes: int = 5
     k_barrier_tp: float = 2.0
     k_barrier_sl: float = 1.5
+    k_cost: float = 3.0
 
     def __post_init__(self) -> None:
         if not 0.0 < self.q < 1.0:
@@ -62,6 +63,8 @@ class PolicyParams:
             raise PolicyError(f"buffer_minutes must be an integer >= 0, got {self.buffer_minutes}")
         if not self.k_barrier_tp > 0 or not self.k_barrier_sl > 0:
             raise PolicyError("barrier multipliers must be positive")
+        if not self.k_cost > 0:
+            raise PolicyError(f"k_cost must be positive, got {self.k_cost}")
 
     @property
     def lambda_risk(self) -> float:
@@ -82,7 +85,7 @@ class PolicyParams:
             if name in values:
                 values[name] = int(values[name])
         for name in ("q", "alpha_total", "z_entry", "rho_max", "impact_budget",
-                     "k_barrier_tp", "k_barrier_sl"):
+                     "k_barrier_tp", "k_barrier_sl", "k_cost"):
             if name in values:
                 values[name] = float(values[name])
         return cls(**values)  # type: ignore[arg-type]
@@ -147,12 +150,15 @@ def load_policy(
 
 @dataclass(frozen=True)
 class Barriers:
-    """Барьеры в целых тиках, выведенные из `σ_1`."""
+    """Барьеры в целых тиках: `k·σ_1` с нижней границей по издержкам."""
 
     tp_ticks: int
     sl_ticks: int
     k_tp: float
     k_sl: float
+    k_cost: float
+    cost_ticks: float
+    floor_applied: bool
     sigma_ticks: float
 
     def __post_init__(self) -> None:
@@ -165,19 +171,39 @@ class Barriers:
             "sl_ticks": self.sl_ticks,
             "k_tp": self.k_tp,
             "k_sl": self.k_sl,
+            "k_cost": self.k_cost,
+            "cost_ticks": round(self.cost_ticks, 6),
+            "floor_applied": self.floor_applied,
             "sigma_ticks": round(self.sigma_ticks, 6),
         }
 
 
-def declare_barriers(sigma_1_ticks: float, params: PolicyParams) -> Barriers:
-    """`a = k_a·σ_1`, `b = k_b·σ_1`, округление половины вверх, минимум один тик."""
+def declare_barriers(
+    sigma_1_ticks: float, params: PolicyParams, *, cost_ticks: float = 0.0
+) -> Barriers:
+    """`b = k_b·σ_1`, `a = max(k_a·σ_1, k_cost·Cost)`, округление половины вверх.
+
+    Нижняя граница по издержкам обязательна: при `a ≤ Cost` положительный EV невозможен
+    ни при каких вероятностях (`holding_exiting.md` §3), и барьер `2σ_1` на минутном
+    горизонте оказывается меньше круговых издержек. `k_cost` — объявленный параметр
+    политики, а не подгонка под результат.
+    """
     if not sigma_1_ticks > 0:
         raise PolicyError(f"sigma_1 in ticks must be positive, got {sigma_1_ticks}")
+    if cost_ticks < 0:
+        raise PolicyError(f"cost in ticks must be non-negative, got {cost_ticks}")
+
+    from_sigma = _to_ticks(params.k_barrier_tp * sigma_1_ticks)
+    from_cost = max(1, math.ceil(params.k_cost * cost_ticks)) if cost_ticks > 0 else 0
+    tp_ticks = max(from_sigma, from_cost)
     return Barriers(
-        tp_ticks=_to_ticks(params.k_barrier_tp * sigma_1_ticks),
+        tp_ticks=tp_ticks,
         sl_ticks=_to_ticks(params.k_barrier_sl * sigma_1_ticks),
         k_tp=params.k_barrier_tp,
         k_sl=params.k_barrier_sl,
+        k_cost=params.k_cost,
+        cost_ticks=cost_ticks,
+        floor_applied=from_cost > from_sigma,
         sigma_ticks=sigma_1_ticks,
     )
 
@@ -227,6 +253,7 @@ def freeze_policy(
     instrument: str,
     sigma_1_ticks: float,
     *,
+    cost_ticks: float = 0.0,
     anchor_mu: Optional[float] = None,
     frame: str = "1min",
     created_at: Optional[str] = None,
@@ -235,7 +262,7 @@ def freeze_policy(
 
     Запись создаётся до расчёта EV: иначе барьеры можно подогнать после результата.
     """
-    barriers = declare_barriers(sigma_1_ticks, params)
+    barriers = declare_barriers(sigma_1_ticks, params, cost_ticks=cost_ticks)
     stamp = created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
     record = registry.register(
         {

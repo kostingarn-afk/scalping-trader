@@ -107,6 +107,32 @@ def test_barriers_never_below_one_tick():
     assert barriers.sl_ticks == 1
 
 
+def test_cost_floor_raises_tp_above_sigma():
+    """TP обязан покрывать издержки: 2σ₁ при дорогом круге меньше Cost."""
+    barriers = declare_barriers(1.0, PolicyParams(), cost_ticks=3.0)
+
+    assert barriers.tp_ticks == 9  # max(2·1, 3·3)
+    assert barriers.floor_applied is True
+    assert barriers.cost_ticks == 3.0
+
+
+def test_cost_floor_not_applied_when_sigma_dominates():
+    barriers = declare_barriers(5.0, PolicyParams(), cost_ticks=1.0)
+
+    assert barriers.tp_ticks == 10  # 2·5 > 3·1
+    assert barriers.floor_applied is False
+
+
+def test_negative_cost_rejected():
+    with pytest.raises(PolicyError):
+        declare_barriers(1.0, PolicyParams(), cost_ticks=-1.0)
+
+
+def test_non_positive_k_cost_rejected():
+    with pytest.raises(PolicyError):
+        PolicyParams(k_cost=0.0)
+
+
 def test_non_positive_sigma_rejected():
     with pytest.raises(PolicyError):
         declare_barriers(0.0, PolicyParams())
@@ -134,7 +160,16 @@ def test_unregistered_policy_rejected():
     frozen = FrozenPolicy(
         instrument="AFLT@TQBR",
         params=PolicyParams(),
-        barriers=Barriers(6, 5, 2.0, 1.5, 3.0),
+        barriers=Barriers(
+            tp_ticks=6,
+            sl_ticks=5,
+            k_tp=2.0,
+            k_sl=1.5,
+            k_cost=3.0,
+            cost_ticks=0.0,
+            floor_applied=False,
+            sigma_ticks=3.0,
+        ),
         registry_id="",
         frozen_at="2026-11-22T00:00:00+00:00",
     )

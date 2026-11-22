@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -215,18 +216,43 @@ def test_ev_rejects_bad_inputs(paths):
     assert main(_args(data, theta_dir, out, registry, "--bootstrap", "10")) == 2
 
 
-def test_ev_negative_cost_bound_is_flagged(tmp_path: Path):
-    """При TP ≤ Cost положительный EV невозможен — это должно быть видно во флаге."""
+def test_ev_cost_floor_raises_tp_above_cost(tmp_path: Path):
+    """Дешёвый σ₁ при дорогом круге: TP поднимается до `k_cost·Cost`, граница становится > 0."""
     data = tmp_path / "data"
     data.mkdir()
     _write_dataset(data, sessions=20, minutes=200)
     theta_dir = tmp_path / "theta"
     theta_dir.mkdir()
-    # σ_1 = 0.0005·100/0.01 = 5 тиков → TP = 10 тиков; комиссия 0.05 % от 100 = 5 тиков/сторона
+    # σ_1 = 0.0005·100/0.01 = 5 тиков → TP от σ = 10 тиков; комиссия 0.05 % от 100 = 5 тиков/сторона
     _write_theta_artifacts(theta_dir, sigma=0.0005, sigma_p=0.0016)
     out = tmp_path / "out"
 
     main(_args(data, theta_dir, out, tmp_path / "registry.jsonl", "--bootstrap", "20"))
+
+    protocol = json.loads((out / "first_passage-protocol.json").read_text(encoding="utf-8"))
+    entry = protocol["payload"]["instruments"][0]
+    assert entry["barriers"]["floor_applied"] is True
+    assert entry["barriers"]["tp_ticks"] == math.ceil(
+        3.0 * entry["cost"]["round_trip_ticks"]
+    )
+    assert entry["sanity"]["viable"] is True
+    assert "COST_FLOOR" in protocol["flags"]["barrier_floor:TEST@TQBR"]
+
+
+def test_ev_negative_bound_is_flagged_when_floor_is_weaker_than_cost(tmp_path: Path):
+    """Флаг `NEGATIVE_BOUND` остаётся достижимым: k_cost < 1 не покрывает круг."""
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_dataset(data, sessions=20, minutes=200)
+    theta_dir = tmp_path / "theta"
+    theta_dir.mkdir()
+    _write_theta_artifacts(theta_dir, sigma=0.0005, sigma_p=0.0016)
+    policy = tmp_path / "policy.yaml"
+    policy.write_text("policy:\n  k_cost: 0.5\n", encoding="utf-8")
+    out = tmp_path / "out"
+
+    main(_args(data, theta_dir, out, tmp_path / "registry.jsonl", "--bootstrap", "20",
+               "--policy", str(policy)))
 
     protocol = json.loads((out / "first_passage-protocol.json").read_text(encoding="utf-8"))
     entry = protocol["payload"]["instruments"][0]
