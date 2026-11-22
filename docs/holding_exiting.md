@@ -27,6 +27,7 @@
 | Величина | Единица | Определение |
 |---|---|---|
 | $\Delta t$ | 1 мин | базовый бар |
+| $\Delta_{MTF}$ | 10 мин | промежуточный фрейм: подтверждение режима, устойчивость $\hat\theta$ |
 | $\Delta_{HTF}$ | 15 мин | бар режимного гейта |
 | $\theta$ | мин$^{-1}$ | скорость возврата, шум-скорректированная |
 | $\sigma$ | тики/$\sqrt{\text{мин}}$ | диффузионная волатильность |
@@ -111,12 +112,13 @@ $$\max_{\tau\in\text{grid}}\ \frac{EV(\tau)}{\sqrt{V(\tau)\,(\tau+w)}}$$
 
 ## 6. Верхние границы
 
-$$\tau_{max}=\min(\tau_{edge},\ \tau_{regime},\ \tau_{model},\ \tau_{liq},\ \tau_{session},\ \tau_{cap})$$
+$$\tau_{max}=\min(\tau_{edge},\ \tau_{regime},\ \tau_{mtf},\ \tau_{model},\ \tau_{liq},\ \tau_{session},\ \tau_{cap})$$
 
 | Граница | Формула |
 |---|---|
 | $\tau_{edge}$ | $\max\{\tau: EV_{LCB}(\tau)>0\}$ |
 | $\tau_{regime}$ | $\Delta_{HTF}\cdot\left\lfloor\dfrac{\ln\!\big((1-q)/\gamma_t(fav)\big)}{\ln \widehat P^{LCB}_{fav,fav}}\right\rfloor$ |
+| $\tau_{mtf}$ | консервативная граница по 10м: при расхождении 10м и 15м состояний берётся меньшее из $\tau_{regime}$ и оценки выживания на 10м; расхождение трактуется как «режим под вопросом» |
 | $\tau_{model}$ | горизонт инвариантности $\hat\theta$ (Research Spec §6.3) |
 | $\tau_{liq}$ | $\Delta t\cdot\left\lceil\dfrac{Q}{\rho_{max}V_{1m}}\right\rceil$ — мягкая; немедленный выход допустим с impact по закону $\ Y\sigma_h\sqrt{Q/V_h}$ |
 | $\tau_{session}$ | $T_{close}-t-\max(\tau_{liq},\Delta t)-\text{buffer}$ |
@@ -182,6 +184,7 @@ $\sigma_P$ входит в $A_0$ → его CI пропагируется в $A_
 | Model invalid | ниже полосы §8 | жёсткий |
 | Regime breaker | 1м CUSUM-of-squares / знак кумулятивного отклонения | жёсткий |
 | Regime confidence | $\gamma_t(fav)<1-q$ | жёсткий |
+| Regime confirmation (10м) | расхождение 10м и 15м состояний | редукция $\tau_{max}$ / no-trade |
 | Vol spike | выброс range-based $\sigma$ → пересчёт $\tau_{max}$ | редукция/выход |
 | Close-cost drift | $\mathbb E[C^{later}_{close}]-C^{now}_{close}$ растёт | по §7 |
 | Session | $\tau_{session}$ | жёсткий |
