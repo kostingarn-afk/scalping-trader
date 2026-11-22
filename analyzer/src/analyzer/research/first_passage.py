@@ -57,6 +57,7 @@ class EVPoint:
     ev_ucb: float
     paths: int
     clusters: int
+    dropped: int = 0
     status: str = STATUS_OK
 
     @property
@@ -80,6 +81,7 @@ class EVPoint:
             "ev_ucb": _number(self.ev_ucb),
             "paths": self.paths,
             "clusters": self.clusters,
+            "dropped": self.dropped,
             "status": self.status,
             "units": {"ev": "ticks", "var": "ticks^2", "sd": "ticks"},
         }
@@ -101,12 +103,6 @@ class EVCurve:
 
     def usable(self) -> List[EVPoint]:
         return [point for point in self.points if point.usable]
-
-    def best_tau(self) -> Optional[EVPoint]:
-        usable = self.usable()
-        if not usable:
-            return None
-        return max(usable, key=lambda point: point.ev_lcb)
 
     def positive(self) -> List[EVPoint]:
         return [point for point in self.usable() if point.ev_lcb > 0]
@@ -231,6 +227,7 @@ def build_curve(
         values: List[float] = []
         kinds: List[int] = []
         session_of: List[int] = []
+        dropped = 0
         for signal in signals:
             resolved = resolve_path(
                 sessions[signal.session],
@@ -242,6 +239,8 @@ def build_curve(
                 tick_value=tick_value,
             )
             if resolved is None:
+                # Путь не умещается в окно и отбрасывается: счётчик виден в артефакте.
+                dropped += 1
                 continue
             kind, value = resolved
             values.append(value)
@@ -261,6 +260,7 @@ def build_curve(
                     ev_ucb=float("nan"),
                     paths=len(values),
                     clusters=len(set(session_of)),
+                    dropped=dropped,
                     status=STATUS_NO_DATA,
                 )
             )
@@ -296,6 +296,7 @@ def build_curve(
                 ev_ucb=high,
                 paths=len(sample),
                 clusters=clusters,
+                dropped=dropped,
                 status=status,
             )
         )

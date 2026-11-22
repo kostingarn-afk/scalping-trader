@@ -128,6 +128,7 @@ class RemainingMoments:
     to_sl: int
     tau_rem: int
     stride: int
+    unconditional: bool = True
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -141,6 +142,7 @@ class RemainingMoments:
             "to_sl": self.to_sl,
             "tau_rem": self.tau_rem,
             "stride": self.stride,
+            "unconditional": self.unconditional,
             "units": {"m_rem": "ticks", "s_rem": "ticks"},
         }
 
@@ -196,6 +198,23 @@ def a0_bounds(
     return point, min(point, lower)
 
 
+def band_checks(
+    tau_max: int, alpha_total: float, step_minutes: int = 1
+) -> Tuple[int, float, float]:
+    """`n_checks = τ_max/Δt`, `α_check = α_total/n_checks` и `z_{1−α_check}` (Бонферрони)."""
+    if step_minutes < 1:
+        raise HoldingError("step_minutes must be at least 1")
+    if not 0.0 < alpha_total < 1.0:
+        raise HoldingError(f"alpha_total must be in (0, 1), got {alpha_total}")
+    if tau_max < 1:
+        raise HoldingError("tau_max must be at least 1")
+    from scipy.stats import norm
+
+    checks = max(1, int(math.ceil(tau_max / step_minutes)))
+    alpha_check = alpha_total / checks
+    return checks, alpha_check, float(norm.ppf(1.0 - alpha_check))
+
+
 def online_band(
     *,
     a0_lcb: float,
@@ -209,20 +228,10 @@ def online_band(
     """Нижняя полоса §8 на горизонте `minutes` от входа."""
     if minutes < 0:
         raise HoldingError("minutes must be non-negative")
-    if step_minutes < 1:
-        raise HoldingError("step_minutes must be at least 1")
-    if not 0.0 < alpha_total < 1.0:
-        raise HoldingError(f"alpha_total must be in (0, 1), got {alpha_total}")
     if theta_lcb <= 0 or theta_ucb <= 0 or theta_lcb > theta_ucb:
         raise HoldingError("theta bounds must satisfy 0 < lcb <= ucb")
-    if tau_max < 1:
-        raise HoldingError("tau_max must be at least 1")
+    checks, alpha_check, z_value = band_checks(tau_max, alpha_total, step_minutes)
 
-    from scipy.stats import norm
-
-    checks = max(1, int(math.ceil(tau_max / step_minutes)))
-    alpha_check = alpha_total / checks
-    z_value = float(norm.ppf(1.0 - alpha_check))
     mean = a0_lcb * math.exp(-theta_lcb * minutes)
     spread = math.sqrt(max(0.0, 1.0 - math.exp(-2.0 * theta_ucb * minutes)))
     return OnlineBand(
@@ -244,11 +253,16 @@ def remaining_moments(
     tick_value: float,
     stride: int = DEFAULT_STRIDE,
     min_paths: int = DEFAULT_MIN_PATHS,
+    until_ts: Optional[int] = None,
 ) -> Optional[RemainingMoments]:
     """`m_rem, s_rem` эмпирически: те же барьеры, тот же протокол «SL первым».
 
     Направление не параметр: расстояния заданы в «благоприятную» и «неблагоприятную» стороны,
     поэтому исходы симметричны для лонга и шорта.
+
+    `until_ts` отсекает бары не раньше текущего момента: путь целиком должен лежать в прошлом,
+    иначе оценка на баре t подглядывает в будущее. Условность по `A_t` не реализуется —
+    моменты безусловны, и это помечено в артефакте.
     """
     if to_tp < 1 or to_sl < 1:
         raise HoldingError("barriers must be at least one tick")
@@ -261,7 +275,13 @@ def remaining_moments(
     wins: List[int] = []
     for session in sessions:
         length = len(session["close"])
+        stamps = session.get("ts")
         for index in range(0, max(0, length - tau_rem), stride):
+            if until_ts is not None:
+                if stamps is None:
+                    raise HoldingError("until_ts requires timestamps")
+                if int(stamps[index + tau_rem]) >= until_ts:
+                    break
             resolved = resolve_path(
                 session,
                 index,
@@ -339,10 +359,22 @@ def hold_decision(
         return HoldDecision(False, "ESTIMATE_MISSING", None, None, cost_drift, a_t, moments)
 
     risk_term = lambda_risk * moments.s_rem
-    hold = moments.m_rem - risk_term > cost_drift
+    edge = moments.m_rem - risk_term
+    if edge > cost_drift:
+        return HoldDecision(
+            hold=True,
+            reason="HOLD",
+            m_rem=moments.m_rem,
+            risk_term=risk_term,
+            cost_drift=cost_drift,
+            a_t=a_t,
+            moments=moments,
+        )
+    # Разделяем причины: дорогое закрытие позже отличается от исчерпанного edge.
+    reason = "CLOSE_COST_DRIFT" if cost_drift > 0 and edge <= cost_drift else "ANCHOR_EDGE"
     return HoldDecision(
-        hold=hold,
-        reason="HOLD" if hold else "ANCHOR_EDGE",
+        hold=False,
+        reason=reason,
         m_rem=moments.m_rem,
         risk_term=risk_term,
         cost_drift=cost_drift,
@@ -351,22 +383,28 @@ def hold_decision(
     )
 
 
-def cusum_breaker(returns: Sequence[float], *, threshold: float = CUSUM_THRESHOLD) -> bool:
-    """CUSUM-of-squares по доходностям: накопленное отклонение выше порога — смена режима.
+def cusum_breaker(
+    returns: Sequence[float], *, threshold: float = CUSUM_THRESHOLD, min_points: int = 10
+) -> bool:
+    """CUSUM-of-squares (`buy_frame.md`): `S_k = Σ(ε_i²/σ² − 1)`, триггер по `max|S_k|`.
 
-    Считается в единицах СКО ряда, поэтому порог безразмерный и переносим между инструментами.
+    `ε_i` — центрированная доходность: тест ловит **смену дисперсии**, а не сдвиг среднего
+    (постоянный дрейф не должен закрывать позицию). Порог `threshold·√n` масштабируется с
+    длиной ряда: для однородного гауссовского ряда `max|S_k| ≈ 2√n`, поэтому порог 4 консервативен.
     """
     if threshold <= 0:
         raise HoldingError("threshold must be positive")
     sample = np.asarray(list(returns), dtype=float)
-    if sample.size < 10:
+    if sample.size < min_points:
         return False
-    scale = float(np.std(sample, ddof=1))
+    centred = sample - float(np.mean(sample))
+    scale = float(np.std(centred, ddof=1))
     if not np.isfinite(scale) or scale <= 0:
         return False
-    standardised = sample / scale
-    total = float(np.sum(standardised))
-    return abs(total) > threshold * math.sqrt(sample.size)
+    standardised = centred / scale
+    cumulative = np.cumsum(standardised**2 - 1.0)
+    peak = float(np.max(np.abs(cumulative)))
+    return peak > threshold * math.sqrt(sample.size)
 
 
 __all__ = [
@@ -387,6 +425,7 @@ __all__ = [
     "TriggerSpec",
     "a0_bounds",
     "a_coordinate",
+    "band_checks",
     "close_cost_drift",
     "cusum_breaker",
     "hold_decision",

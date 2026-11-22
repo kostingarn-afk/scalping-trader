@@ -192,7 +192,7 @@ def test_close_when_close_cost_drift_exceeds_edge():
                              cost_drift=3.0, moments=_moments(2.0, 1.0))
 
     assert decision.hold is False
-    assert decision.reason == "ANCHOR_EDGE"
+    assert decision.reason == "CLOSE_COST_DRIFT"
 
 
 def test_overshoot_closes_before_any_estimate():
@@ -246,13 +246,16 @@ def test_close_cost_drift_rejects_bad_inputs():
                          spread_now=1.0, spread_later=1.0)
 
 
-def test_cusum_detects_shift_and_ignores_noise():
+def test_cusum_of_squares_detects_variance_jump_not_mean_shift():
+    """Тест ловит смену дисперсии: постоянный дрейф не должен закрывать позицию."""
     rng = np.random.default_rng(5)
-    shifted = 0.5 + rng.normal(0.0, 0.01, 200)
-    balanced = np.concatenate([0.5 + rng.normal(0.0, 0.01, 100), -0.5 + rng.normal(0.0, 0.01, 100)])
+    drift_only = 0.5 + rng.normal(0.0, 0.01, 200)
+    variance_jump = np.concatenate(
+        [rng.normal(0.0, 0.001, 100), rng.normal(0.0, 0.02, 100)]
+    )
 
-    assert cusum_breaker(shifted) is True
-    assert cusum_breaker(balanced) is False
+    assert cusum_breaker(drift_only) is False
+    assert cusum_breaker(variance_jump) is True
 
 
 def test_cusum_requires_enough_points():

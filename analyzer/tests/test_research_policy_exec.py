@@ -63,12 +63,13 @@ def _config(**overrides) -> ExecutionConfig:
         instrument="TEST@TQBR",
         tick_value=0.01,
         sigma_p_ticks=20.0,
+        sigma_p_log=0.0,
         cost_ticks=0.5,
         theta_lcb=0.05,
         theta_ucb=0.06,
         tau_liq=1,
         d_ticks=40.0,
-        regime_gate=True,
+        regime_gates={1: True, -1: True},
         tp_ticks=4,
         sl_ticks=2,
     )
@@ -216,7 +217,11 @@ def test_entry_blocked_by_sanity_when_d_not_above_cost(hold_moments):
 def test_entry_blocked_by_regime_confidence(hold_moments):
     signal = Signal(session=0, index=2, direction=1, z=-3.0, price=100.0, anchor=100.40)
 
-    result = _run([_arrays([100.0] * 12)], signal, config=_config(regime_gate=False))
+    result = _run(
+        [_arrays([100.0] * 12)],
+        signal,
+        config=_config(regime_gates={1: False, -1: True}),
+    )
 
     assert result.no_trade_counts[REGIME_BLOCK] == 1
 
@@ -263,3 +268,24 @@ def test_execution_rejects_bad_config(hold_moments):
         _run([_arrays([100.0] * 12)], signal, config=_config(tick_value=0.0))
     with pytest.raises(ExecutionError):
         _run([_arrays([100.0] * 12)], signal, config=_config(cost_ticks=-1.0))
+
+
+def test_trade_marks_sample_relative_to_train_boundary(hold_moments):
+    """Граница train/OOS объявлена заранее: вход до неё — `train`, после — `oos`."""
+    prices = [100.0, 100.0, 100.0, 100.02, 100.04, 100.06]
+    signal = Signal(session=0, index=2, direction=1, z=-3.0, price=100.0, anchor=100.40)
+    start = datetime(2026, 9, 1, 7, 0, tzinfo=timezone.utc)
+
+    in_train = _run(
+        [_arrays(prices)],
+        signal,
+        config=_config(train_until_ts=int(start.timestamp()) + 180),
+    )
+    in_oos = _run(
+        [_arrays(prices)],
+        signal,
+        config=_config(train_until_ts=int(start.timestamp()) + 60),
+    )
+
+    assert in_train.trades[0].sample == "train"
+    assert in_oos.trades[0].sample == "oos"

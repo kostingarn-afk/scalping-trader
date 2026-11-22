@@ -248,6 +248,21 @@ def test_short_cluster_marks_interval_degenerate():
     assert point.status == STATUS_DEGENERATE
 
 
+def test_curve_counts_dropped_paths():
+    """Путь, не умещающийся в окно, отбрасывается, и это видно в счётчике."""
+    session = _session([100] * 10, highs=[102] * 10)
+    signals = [_signal(0, 0, 1), _signal(0, 8, 1)]
+
+    curve = build_curve(
+        [session], signals, tp_ticks=2, sl_ticks=2, cost_ticks=0.0, tick_value=1.0,
+        taus=(5,), bootstrap=50, min_paths=2,
+    )
+
+    point = curve.points[0]
+    assert point.dropped == 1
+    assert point.to_dict()["dropped"] == 1
+
+
 def test_curve_marks_no_data_below_minimum():
     session = _session([100] * 10)
 
@@ -331,7 +346,19 @@ def test_tau_star_on_edge_below_cap_is_boundary():
     selection = select_tau(curve, waiting_bars=0.0, tau_cap=30)
 
     assert selection.verdict == BOUNDARY
-    assert selection.entry_allowed is True
+    # Край сетки — «сетка коротка»: вход по нему запрещён, как и при скоупе.
+    assert selection.entry_allowed is False
+
+
+def test_tau_star_on_cap_with_longer_grid_is_scope_violation():
+    """Оптимум ровно на `τ_cap` при сетке, уходящей дальше, — тоже скоуп."""
+    curve = _curve([_point(1, 0.1, 0.05), _point(60, 1.0, 0.7), _point(120, 0.9, 0.6)])
+
+    selection = select_tau(curve, waiting_bars=0.0, tau_cap=60)
+
+    assert selection.tau == 60
+    assert selection.verdict == SCOPE_VIOLATION
+    assert selection.entry_allowed is False
 
 
 def test_no_positive_lcb_blocks_entry():

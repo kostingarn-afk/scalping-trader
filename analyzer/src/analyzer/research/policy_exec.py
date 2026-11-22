@@ -44,7 +44,6 @@ SESSION_LIMIT = "SESSION"
 TAU_EXCEEDS_SESSION = "TAU_EXCEEDS_SESSION"
 REGIME_BLOCK = "REGIME_CONFIDENCE"
 SANITY_BLOCK = "SANITY"
-SCOPE_BLOCK = "SCOPE_VIOLATION"
 
 
 class ExecutionError(ValueError):
@@ -58,34 +57,46 @@ class ExecutionConfig:
     instrument: str
     tick_value: float
     sigma_p_ticks: float
+    sigma_p_log: float
     cost_ticks: float
     theta_lcb: float
     theta_ucb: float
     tau_liq: int
     d_ticks: float
-    regime_gate: bool
+    regime_gates: Dict[int, bool]
     tp_ticks: int
     sl_ticks: int
+    mtf_tau_minutes: Optional[int] = None
     position_rub: float = 200_000.0
     stride: int = DEFAULT_STRIDE
     step_minutes: int = 1
+    train_until_ts: Optional[int] = None
+
+    def sigma_price(self, price: float) -> float:
+        """`σ_P` в ценовых единицах на момент `price`: лог-масштаб не переносится на другой уровень."""
+        if self.sigma_p_log > 0:
+            return self.sigma_p_log * price
+        return self.sigma_p_ticks * self.tick_value
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "instrument": self.instrument,
             "tick_value": self.tick_value,
             "sigma_p_ticks": round(self.sigma_p_ticks, 6),
+            "sigma_p_log": self.sigma_p_log,
             "cost_ticks": round(self.cost_ticks, 6),
             "theta_lcb": self.theta_lcb,
             "theta_ucb": self.theta_ucb,
             "tau_liq": self.tau_liq,
             "d_ticks": round(self.d_ticks, 6),
-            "regime_gate": self.regime_gate,
+            "regime_gates": {str(key): value for key, value in self.regime_gates.items()},
             "tp_ticks": self.tp_ticks,
             "sl_ticks": self.sl_ticks,
+            "mtf_tau_minutes": self.mtf_tau_minutes,
             "position_rub": self.position_rub,
             "stride": self.stride,
             "step_minutes": self.step_minutes,
+            "train_until_ts": self.train_until_ts,
         }
 
 
@@ -109,6 +120,7 @@ class Trade:
     a_exit: float
     band_lower: Optional[float]
     hold: bool
+    sample: str = "full"
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -128,6 +140,7 @@ class Trade:
             "a_exit": round(self.a_exit, 6),
             "band_lower": None if self.band_lower is None else round(self.band_lower, 6),
             "hold": self.hold,
+            "sample": self.sample,
             "units": {"gross_ticks": "ticks", "cost_ticks": "ticks", "net_ticks": "ticks"},
         }
 
@@ -202,7 +215,7 @@ def execute_policy(
                 NoTrade(
                     config.instrument,
                     _signal_ts(sessions, signal),
-                    NO_THETA if tau_max.value is None else SCOPE_BLOCK,
+                    NO_THETA,
                     "; ".join(tau_max.reasons),
                 )
                 for signal in signals
@@ -218,12 +231,13 @@ def execute_policy(
     no_trades: List[NoTrade] = []
     exit_counts: Dict[str, int] = {}
     no_trade_counts: Dict[str, int] = {}
-    occupied: set[int] = set()
+    # Окно занято до индекса выхода: после закрытия вход в это же окно снова возможен.
+    occupied_until: Dict[int, int] = {}
 
     for signal in signals:
         ts = _signal_ts(sessions, signal)
         block = _entry_block(
-            signal, sessions, schedule, decision, config, tau_max.value, occupied
+            signal, sessions, schedule, decision, config, tau_max.value, occupied_until
         )
         if block is not None:
             reason, detail = block
@@ -239,7 +253,9 @@ def execute_policy(
             no_trade_counts[NO_THETA] = no_trade_counts.get(NO_THETA, 0) + 1
             continue
         trades.append(trade)
-        occupied.add(signal.session)
+        stamps = sessions[signal.session]["ts"]
+        exit_index = _index_of(stamps, trade.exit_ts)
+        occupied_until[signal.session] = max(exit_index, signal.index)
         exit_counts[trade.exit_reason] = exit_counts.get(trade.exit_reason, 0) + 1
 
     unknown = {trade.exit_reason for trade in trades} - {
@@ -282,15 +298,15 @@ def _entry_block(
     decision: EntryDecision,
     config: ExecutionConfig,
     tau_max_value: int,
-    occupied: set[int],
+    occupied_until: Dict[int, int],
 ) -> Optional[Tuple[str, str]]:
     """Причины отказа входа в порядке §10; `None` — вход разрешён."""
-    if signal.session in occupied:
-        return POSITION_OPEN, "в окне уже открыта позиция"
+    if signal.index <= occupied_until.get(signal.session, -1):
+        return POSITION_OPEN, "в окне ещё открыта позиция"
     if not decision.allowed:
         return decision.reason, "входной гейт EV_LCB/τ_max"
-    if not config.regime_gate:
-        return REGIME_BLOCK, "γ_t(fav) < 1−q"
+    if not config.regime_gates.get(signal.direction, True):
+        return REGIME_BLOCK, "γ_t(fav) < 1−q для направления входа"
     if config.d_ticks <= config.cost_ticks:
         return SANITY_BLOCK, f"D={config.d_ticks:.2f} ≤ Cost={config.cost_ticks:.2f}"
     stamps = sessions[signal.session]["ts"]
@@ -334,18 +350,24 @@ def _run_position(
     direction = signal.direction
     entry = float(close[entry_index])
     anchor = signal.anchor if signal.anchor else entry
+    sigma_entry = config.sigma_price(entry)
     a_entry, a0_lcb = a0_bounds(
         entry,
         anchor,
-        sigma_p=config.sigma_p_ticks * config.tick_value,
-        sigma_p_lcb=config.sigma_p_ticks * config.tick_value,
-        sigma_p_ucb=config.sigma_p_ticks * config.tick_value,
+        sigma_p=sigma_entry,
+        sigma_p_lcb=sigma_entry,
+        sigma_p_ucb=sigma_entry,
         direction=direction,
     )
     tp_price = entry + direction * config.tp_ticks * config.tick_value
     sl_price = entry - direction * config.sl_ticks * config.tick_value
     lambda_risk = policy.lambda_risk
     returns: List[float] = []
+
+    # Редукция по 10m: расхождение фреймов укорачивает горизонт, а не закрывает позицию сразу.
+    if config.mtf_tau_minutes is not None:
+        horizon = min(horizon, max(1, config.mtf_tau_minutes))
+        tau = min(tau, horizon)
 
     exit_reason = "TIME_STOP"
     exit_price = float(close[entry_index + horizon])
@@ -374,17 +396,20 @@ def _run_position(
         if cusum_breaker(returns):
             exit_reason, exit_price, exit_index = "REGIME_BREAKER", float(close[index]), index
             break
+        if not config.regime_gates.get(direction, True):
+            exit_reason, exit_price, exit_index = "REGIME_CONFIDENCE", float(close[index]), index
+            break
         minutes_to_close = schedule.minutes_to_close(_moment(int(stamps[index])))
         if 0 <= minutes_to_close <= config.tau_liq + policy.buffer_minutes:
             exit_reason, exit_price, exit_index = "SESSION", float(close[index]), index
             break
-        if _vol_spike(arrays, index, entry_index):
+        if _vol_spike(arrays, index, entry_index) and step * 2 >= tau:
+            # §9: vol_spike — редукция; если редукция не оставляет горизонта, она завершает выход.
             exit_reason, exit_price, exit_index = "VOL_SPIKE", float(close[index]), index
             break
 
-        a_t = a_coordinate(
-            float(close[index]), anchor, config.sigma_p_ticks * config.tick_value, direction
-        )
+        sigma_now = config.sigma_price(float(close[index]))
+        a_t = a_coordinate(float(close[index]), anchor, sigma_now, direction)
         band_lower = online_band(
             a0_lcb=a0_lcb,
             theta_lcb=config.theta_lcb,
@@ -407,6 +432,7 @@ def _run_position(
             tau_rem=tau_rem,
             tick_value=config.tick_value,
             stride=config.stride,
+            until_ts=int(stamps[index]),
         )
         verdict = hold_decision(
             a_t=a_t,
@@ -425,8 +451,11 @@ def _run_position(
 
     gross = direction * (exit_price - entry) / config.tick_value
     net = gross - config.cost_ticks
-    a_exit = a_coordinate(
-        exit_price, anchor, config.sigma_p_ticks * config.tick_value, direction
+    a_exit = a_coordinate(exit_price, anchor, config.sigma_price(exit_price), direction)
+    sample = (
+        "train"
+        if config.train_until_ts is not None and int(stamps[entry_index]) < config.train_until_ts
+        else "oos"
     )
     return Trade(
         instrument=config.instrument,
@@ -445,7 +474,14 @@ def _run_position(
         a_exit=a_exit,
         band_lower=band_lower,
         hold=hold_flag,
+        sample=sample,
     )
+
+
+def _index_of(stamps: np.ndarray, iso: str) -> int:
+    """Индекс бара по ISO-метке выхода (для освобождения окна)."""
+    target = int(datetime.fromisoformat(iso).timestamp())
+    return int(np.searchsorted(stamps, target, side="left"))
 
 
 def _vol_spike(arrays: SessionArrays, index: int, entry_index: int) -> bool:
@@ -472,7 +508,6 @@ __all__ = [
     "POSITION_OPEN",
     "REGIME_BLOCK",
     "SANITY_BLOCK",
-    "SCOPE_BLOCK",
     "SESSION_LIMIT",
     "TAU_EXCEEDS_SESSION",
     "Trade",

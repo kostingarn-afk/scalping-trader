@@ -11,6 +11,7 @@ from analyzer.research.regime import (
     evaluate_regime,
     fit_hmm,
     markov_counts,
+    mtf_consistency,
     regime_features,
     survival,
     wilson_lower,
@@ -81,13 +82,22 @@ def test_features_reject_empty_sessions():
         regime_features([_arrays([100.0])])
 
 
-def test_markov_counts_ignore_session_boundary():
+def test_markov_counts_count_switches_not_pairs():
+    """`N_trans` — число смен состояния, а не число пар баров (buy_frame §16)."""
     counts, transitions = markov_counts([0, 1, 1, 0, 0], [0, 0, 0, 1, 1])
 
-    assert transitions == 3
+    assert transitions == 1
     assert counts[0, 1] == 1
     assert counts[1, 1] == 1
-    assert counts[0, 0] == 1
+    assert counts[0, 0] == 1  # пара 0→0 в другом окне: пара есть, смены нет
+
+
+def test_markov_counts_ignore_session_boundary():
+    counts, transitions = markov_counts([0, 1, 1, 0], [0, 0, 0, 0])
+
+    assert transitions == 2
+    assert counts[1, 1] == 1
+    assert counts[0, 1] + counts[1, 0] == 2
 
 
 def test_wilson_lower_is_conservative_and_monotone():
@@ -153,9 +163,11 @@ def _synthetic_sessions(*, sessions: int = 20, buckets: int = 40, seed: int = 11
         level = 100.0
         for state in states:
             sigma = 0.0004 if state == 0 else 0.004
+            # Дрейф задан, иначе `fav` (знак дрейфа) не определится на синтетике.
+            drift = 0.0005 if state == 0 else -0.0005
             steps = [level]
             for _ in range(15):
-                level *= float(np.exp(sigma * rng.normal()))
+                level *= float(np.exp(drift / 15.0 + sigma * rng.normal()))
                 steps.append(level)
             opens.extend([steps[0]] * 15)
             highs.extend([max(steps)] * 15)
@@ -181,9 +193,10 @@ def test_regime_fit_orders_states_by_volatility_and_passes_gate2():
         [aggregate_minutes(session, 15) for session in sessions]
     )
 
-    model, order, score, mean_volatility = fit_hmm(features, lengths, seeds=2)
+    model, order, score, mean_volatility, converged = fit_hmm(features, lengths, seeds=2)
 
     assert np.isfinite(score)
+    assert isinstance(converged, bool)
     assert mean_volatility[int(order[0])] < mean_volatility[int(order[1])]
 
 
@@ -196,10 +209,14 @@ def test_evaluate_regime_reports_gate2_and_survival():
     assert report.fit.gate2_passed is True
     assert report.gates["regime"] == "PASS"
     assert report.fit.volatility[0] < report.fit.volatility[1]
-    assert report.survival is not None
-    assert set(report.survival_by_state) == {0, 1}
+    # fav задаётся знаком дрейфа: у синтетики спокойное состояние с положительным дрейфом.
+    assert report.fit.fav(1) is not None
+    assert set(report.survival_by_direction) == {1, -1}
+    assert report.survival_by_direction[1] is not None
     assert report.mtf_disagreement is not None
     assert 0.0 <= report.mtf_disagreement <= 1.0
+    assert report.tau_regime_minutes is not None
+    assert report.tau_mtf_minutes is None or report.tau_mtf_minutes <= report.tau_regime_minutes
 
 
 def test_evaluate_regime_marks_failure_on_short_history():
@@ -209,7 +226,9 @@ def test_evaluate_regime_marks_failure_on_short_history():
 
     assert report.fit is None
     assert report.gates["regime"].startswith("GATE2_FAILED")
-    assert report.survival is None
+    assert report.survival_by_direction == {1: None, -1: None}
+    # При провале Gate 2 гейт не блокирует вход: компонент уходит в REFERENCE_ONLY.
+    assert report.gate_passed == {1: True, -1: True}
 
 
 def test_evaluate_regime_rejects_incompatible_frames():
@@ -218,7 +237,7 @@ def test_evaluate_regime_rejects_incompatible_frames():
                         htf_minutes=10, mtf_minutes=15)
 
 
-def test_mtf_disagreement_halves_horizon_only_above_limit():
+def test_mtf_consistency_measures_share_of_mismatched_bars():
     ts = np.asarray([0, 900, 1800, 2700], dtype=np.int64)
     htf_states = np.asarray([0, 0, 0, 0])
     mtf_ts = np.asarray([0, 600, 1200, 1800, 2400, 3000], dtype=np.int64)
@@ -226,12 +245,9 @@ def test_mtf_disagreement_halves_horizon_only_above_limit():
     match = [(mtf_ts, np.asarray([0, 0, 0, 0, 0, 0]))]
     other = [(mtf_ts, np.asarray([1, 1, 1, 1, 1, 1]))]
 
-    from analyzer.research.regime import mtf_consistency
-
-    agree, tau_agree = mtf_consistency(same, match, tau_minutes=60)
-    disagree, tau_disagree = mtf_consistency(same, other, tau_minutes=60)
+    agree = mtf_consistency(same, match)
+    disagree = mtf_consistency(same, other)
 
     assert agree == pytest.approx(0.0)
-    assert tau_agree == 60
+    assert disagree == pytest.approx(1.0)
     assert disagree > MTF_DISAGREEMENT_LIMIT
-    assert tau_disagree == 30

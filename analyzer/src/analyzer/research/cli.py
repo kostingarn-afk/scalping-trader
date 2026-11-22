@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..backtest.loader import HistoryDataset, scan_dir
 from .artifacts import build_artifact, collect_flags
-from .costs import CostEstimate, estimate_cost
+from .costs import CostError, CostEstimate, estimate_cost
 from .ev import (
     COMPONENT_OK,
     COMPONENT_REFERENCE,
@@ -30,6 +30,7 @@ from .holding import (
     CUSUM_THRESHOLD,
     EXIT_TRIGGERS,
     REDUCING_TRIGGERS,
+    band_checks,
 )
 from .policy_exec import (
     VOL_SPIKE_MULTIPLIER,
@@ -239,6 +240,14 @@ def build_parser() -> argparse.ArgumentParser:
                 type=float,
                 default=200_000.0,
                 help="размер позиции в рублях для τ_liq",
+            )
+            command.add_argument(
+                "--train-share",
+                type=float,
+                default=0.75,
+                help=(
+                    "доля окна для train: τ* и HMM считаются на ней, исполнение — на всём окне"
+                ),
             )
     return parser
 
@@ -860,6 +869,16 @@ def _run_ev(
     executions: List[ExecutionResult] = []
     for dataset in datasets:
         name = dataset.instrument.name
+        if dataset.interval_minutes != 1:
+            # τ, τ_session, τ_liq и агрегация 15m/10m определены для минутного бара.
+            skipped.append(
+                {
+                    "instrument": name,
+                    "reason": f"FRAME: {dataset.interval_minutes}min, требуется 1min",
+                }
+            )
+            flags[f"frame:{name}"] = "WRONG_FRAME"
+            continue
         try:
             tick = _resolve_tick(dataset)
         except TickSizeError as exc:
@@ -884,16 +903,22 @@ def _run_ev(
         except ThetaError as exc:
             skipped.append({"instrument": name, "reason": f"NO_DATA: {exc}"})
             continue
-        price = _median_price(bars)
+        train_bars, cut_ts, split = _split_window(bars, args.train_share)
+        price = _median_price(train_bars)
         sigma_ticks = float(source["sigma"]) * price / tick.value
         sigma_p_ticks = float(source["sigma_p"]) * price / tick.value
-        cost = estimate_cost(
-            price,
-            tick,
-            tariff=args.tariff,
-            spread_bps=args.spread_bps,
-            spread_verified=args.spread_verified,
-        )
+        sigma_p_log = float(source["sigma_p"])
+        try:
+            cost = estimate_cost(
+                price,
+                tick,
+                tariff=args.tariff,
+                spread_bps=args.spread_bps,
+                spread_verified=args.spread_verified,
+            )
+        except CostError as exc:
+            skipped.append({"instrument": name, "reason": f"COST: {exc}"})
+            continue
         try:
             barriers = declare_barriers(
                 sigma_ticks, policy, cost_ticks=cost.round_trip_ticks
@@ -902,10 +927,12 @@ def _run_ev(
             skipped.append({"instrument": name, "reason": f"POLICY: {exc}"})
             continue
         sessions = session_ohlcv(bars, schedule)
+        train_sessions = session_ohlcv(train_bars, schedule)
         try:
             signals = ou_signals(
-                sessions,
+                train_sessions,
                 sigma_p_ticks=sigma_p_ticks,
+                sigma_p_log=sigma_p_log,
                 z_entry=policy.z_entry,
                 tick_value=tick.value,
             )
@@ -919,7 +946,7 @@ def _run_ev(
 
         try:
             curve = build_curve(
-                sessions,
+                train_sessions,
                 signals.signals,
                 tp_ticks=barriers.tp_ticks,
                 sl_ticks=barriers.sl_ticks,
@@ -935,28 +962,29 @@ def _run_ev(
         selection = select_tau(
             curve, waiting_bars=signals.waiting_bars, tau_cap=policy.tau_cap_minutes
         )
-        regime, regime_error = _regime_report(sessions, name, policy.q, args.regime_seeds)
+        regime, regime_error = _regime_report(
+            sessions, name, policy.q, args.regime_seeds, train_until_ts=cut_ts
+        )
         if regime_error:
             flags[f"regime:{name}"] = f"REGIME_FAILED: {regime_error}"
-        tau_regime = (
-            regime.survival.tau_minutes
-            if regime is not None and regime.survival is not None
-            else None
-        )
-        tau_mtf = regime.mtf_tau_minutes if regime is not None else None
+        tau_regime = regime.tau_regime_minutes if regime is not None else None
+        tau_mtf = regime.tau_mtf_minutes if regime is not None else None
+        regime_gates = regime.gate_passed if regime is not None else {1: True, -1: True}
         regime_status = (
-            COMPONENT_REFERENCE
-            if regime is None or tau_regime is None
-            else COMPONENT_OK
+            COMPONENT_REFERENCE if tau_regime is None else COMPONENT_OK
         )
-        tau_liq = _tau_liquidation(
-            bars,
-            price=price,
-            lot_size=int(dataset.instrument.lot_size),
-            tick_value=tick.value,
-            position_rub=args.position_rub,
-            rho_max=policy.rho_max,
-        )
+        try:
+            tau_liq = _tau_liquidation(
+                bars,
+                price=price,
+                lot_size=int(dataset.instrument.lot_size),
+                tick_value=tick.value,
+                position_rub=args.position_rub,
+                rho_max=policy.rho_max,
+            )
+        except (ValueError, ZeroDivisionError) as exc:
+            skipped.append({"instrument": name, "reason": f"LIQ: {exc}"})
+            continue
         tau_session, tau_session_min = _session_horizon(
             sessions, signals.signals, schedule, tau_liq
         )
@@ -986,6 +1014,8 @@ def _run_ev(
             {
                 "instrument": name,
                 "bars": len(bars),
+                "train_bars": len(train_bars),
+                "split": split,
                 "tick_value": tick.value,
                 "tick_source": tick.source,
                 "price_reference": round(price, 6),
@@ -1022,6 +1052,7 @@ def _run_ev(
                 "points": [point.to_dict() for point in curve.points],
                 "tau_star": selection.to_dict(),
                 "tau_max": tau_max.to_dict(),
+                "stress": _stress_payload(curve, selection, cost.round_trip_ticks),
                 "regime": None if regime is None else regime.to_dict(),
                 "horizons": {
                     "tau_liq": tau_liq,
@@ -1065,21 +1096,21 @@ def _run_ev(
 
         if execute:
             theta_ci = source.get("theta_ci") or [None, None]
-            theta_used = float(source.get("theta") or 0.0)
+            theta_point = float(source.get("theta") or 0.0)
             if (
                 isinstance(theta_ci, (list, tuple))
                 and len(theta_ci) == 2
                 and all(isinstance(item, (int, float)) and item > 0 for item in theta_ci)
+                and theta_ci[0] < theta_ci[1]
             ):
                 theta_lcb, theta_ubc = float(theta_ci[0]), float(theta_ci[1])
+                if not (theta_lcb <= theta_point <= theta_ubc):
+                    flags[f"theta_ci:{name}"] = (
+                        "MISMATCH: точка θ_used вне CI ACF-оценки; полоса по CI ACF"
+                    )
             else:
-                theta_lcb = theta_ubc = theta_used
+                theta_lcb = theta_ubc = max(theta_point, 1e-9)
                 flags[f"theta_ci:{name}"] = "NO_THETA_CI: полоса по точечной θ"
-            regime_gate = bool(
-                regime is not None
-                and regime.survival is not None
-                and regime.survival.gate_passed
-            )
             try:
                 executions.append(
                     execute_policy(
@@ -1094,19 +1125,22 @@ def _run_ev(
                             instrument=name,
                             tick_value=tick.value,
                             sigma_p_ticks=sigma_p_ticks,
+                            sigma_p_log=sigma_p_log,
                             cost_ticks=cost.round_trip_ticks,
                             theta_lcb=theta_lcb,
                             theta_ucb=theta_ubc,
                             tau_liq=tau_liq,
                             d_ticks=d_ticks,
-                            regime_gate=regime_gate,
+                            regime_gates=regime_gates,
                             tp_ticks=barriers.tp_ticks,
                             sl_ticks=barriers.sl_ticks,
+                            mtf_tau_minutes=tau_mtf,
                             position_rub=args.position_rub,
+                            train_until_ts=cut_ts,
                         ),
                     )
                 )
-            except ExecutionError as exc:
+            except (ExecutionError, ValueError) as exc:
                 flags[f"execution:{name}"] = f"EXECUTION_FAILED: {exc}"
 
     allowed = sum(1 for entry in entries if entry["entry"]["allowed"])  # type: ignore[index]
@@ -1235,6 +1269,7 @@ def _run_ev(
                             "tau_star": entry["tau_star"],
                             "entry": entry["entry"],
                             "tau_max": entry["tau_max"],
+                            "split": entry["split"],
                             "waiting_bars": entry["signals"]["waiting_bars"],  # type: ignore[index]
                         }
                         for entry in entries
@@ -1434,6 +1469,22 @@ def _write_execution_artifacts(
                     "trial_id": trial_id,
                     "alpha_total": policy.alpha_total,
                     "step_minutes": 1,
+                    "per_instrument": [
+                        {
+                            "instrument": result.instrument,
+                            "tau_max": result.tau_max,
+                            **dict(
+                                zip(
+                                    ("n_checks", "alpha_check", "z_value"),
+                                    band_checks(
+                                        max(1, result.tau_max),
+                                        policy.alpha_total,
+                                    ),
+                                )
+                            ),
+                        }
+                        for result in executions
+                    ],
                     "note": "σ_P берётся точечной оценкой R2 (NO_SIGMA_CI)",
                 },
             ),
@@ -1574,13 +1625,73 @@ def _median_price(bars: Sequence) -> float:
 
 
 def _regime_report(
-    sessions: Sequence, instrument: str, q: float, seeds: int
+    sessions: Sequence,
+    instrument: str,
+    q: float,
+    seeds: int,
+    *,
+    train_until_ts: Optional[int] = None,
 ) -> Tuple[Optional[RegimeReport], Optional[str]]:
     """Режимная модель инструмента; ошибка не обрывает прогон, а идёт в флаги."""
     try:
-        return evaluate_regime(sessions, instrument=instrument, q=q, seeds=seeds), None
+        return (
+            evaluate_regime(
+                sessions,
+                instrument=instrument,
+                q=q,
+                seeds=seeds,
+                train_until_ts=train_until_ts,
+            ),
+            None,
+        )
     except RegimeError as exc:
         return None, str(exc)
+
+
+def _split_window(
+    bars: Sequence, share: float
+) -> Tuple[Sequence, Optional[int], Dict[str, object]]:
+    """Разделить окно на train/OOS по времени; граница пишется в артефакт.
+
+    Отбор `τ*` и обучение HMM идут на train; исполнение — на всём окне, и каждая сделка
+    помечается `sample`. Доля объявляется заранее и не подбирается по результату.
+    """
+    if not 0.5 <= share < 1.0:
+        raise ThetaError(f"train share must be in [0.5, 1), got {share}")
+    ordered = sorted(bars, key=lambda bar: bar.ts)
+    cut = max(1, int(len(ordered) * share))
+    if cut >= len(ordered):
+        cut = len(ordered) - 1
+    train = ordered[:cut]
+    cut_ts = int(ordered[cut].ts.timestamp())
+    split = {
+        "train_share": share,
+        "train_bars": len(train),
+        "oos_bars": len(ordered) - len(train),
+        "cut": ordered[cut].ts.isoformat(),
+        "policy": "τ* и HMM на train; исполнение на всём окне с меткой sample",
+    }
+    return train, cut_ts, split
+
+
+def _stress_payload(
+    curve, selection, cost_ticks: float, multiplier: float = 1.5
+) -> Dict[str, object]:
+    """Стресс издержек: `Cost` входит аддитивно, поэтому сдвиг EV и LCB точен без пересчёта CI."""
+    delta = (multiplier - 1.0) * cost_ticks
+    point = next(
+        (item for item in curve.points if selection.tau is not None and item.tau == selection.tau),
+        None,
+    )
+    if point is None:
+        return {"multiplier": multiplier, "delta_cost": round(delta, 6), "ev": None, "ev_lcb": None}
+    return {
+        "multiplier": multiplier,
+        "delta_cost": round(delta, 6),
+        "ev": round(point.ev - delta, 6),
+        "ev_lcb": round(point.ev_lcb - delta, 6),
+        "note": "спред не измерен: стресс только по измеренной части круга",
+    }
 
 
 def _tau_liquidation(
@@ -1725,8 +1836,8 @@ def _format_ev(
             lines.append(f"| {item['instrument']} | `{item['reason']}` |")
         lines.append("")
     lines.append(
-        "`τ_max` посчитан только по `τ_cap`: остальные компоненты — шаг R3.2, "
-        "флаг `TAU_MAX_INCOMPLETE`."
+        "`τ_max` собран из семи компонент: значения и статусы — в `tau-max.json`; "
+        "неполный набор помечается флагом `TAU_MAX_INCOMPLETE`."
     )
     return "\n".join(lines)
 

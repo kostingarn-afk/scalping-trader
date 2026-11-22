@@ -6,15 +6,19 @@
 Состояния упорядочиваются по range-based волатильности детерминированно: «спокойное» — то, у
 которого средняя волатильность ниже. Это защищает от перестановки меток между рестартами.
 
-Gate 2 (`buy_frame.md` §16): `N_trans ≥ 10·K·(K−1)`; при `K = 2` это 20 переходов. При провале
-модель понижается до `REFERENCE_ONLY` и не участвует в `τ_max`; понижать `K` или вводить приор
-автоматически запрещено — это была бы подгонка под данные.
+`N_trans` считается как в `buy_frame.md` §16 — число **смен** состояния
+(`argmax γ_t ≠ argmax γ_{t+1}`), а не число пар баров. Переходы внутри состояния — не переходы,
+и считать их означало бы проходить Gate 2 на почти постоянном ряду.
+
+`fav`-состояние задаётся знаком дрейфа: для лонга благоприятно состояние с положительной
+средней доходностью, для шорта — с отрицательной. Гейт и горизонт берутся по `fav`, а не по
+худшему состоянию: «худшее» относится к направлению, в котором мы не торгуем.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -24,7 +28,7 @@ HTF_MINUTES = 15
 MTF_MINUTES = 10
 STATES = 2
 GATE2_PER_PARAMETER = 10
-#: Доля несогласованных 10m-баров, выше которой горизонт укорачивается вдвое.
+#: Доля несогласованных 10m-баров, выше которой горизонт берётся как минимум двух оценок.
 MTF_DISAGREEMENT_LIMIT = 0.25
 #: z для односторонней нижней границы Уилсона (95 %).
 WILSON_Z = 1.645
@@ -36,6 +40,8 @@ GATE2_PASSED = "PASS"
 GATE2_FAILED = "GATE2_FAILED"
 REFERENCE_ONLY = "REFERENCE_ONLY"
 PROXY_IMBALANCE = "PROXY:volume-imbalance"
+LONG = 1
+SHORT = -1
 
 
 class RegimeError(ValueError):
@@ -50,28 +56,49 @@ class RegimeFit:
     session_of: Tuple[int, ...]
     transition: Tuple[Tuple[float, ...], ...]
     counts: Tuple[Tuple[int, ...], ...]
+    drift: Tuple[float, ...]
     volatility: Tuple[float, ...]
-    transition_counts: int
+    transitions: int
     gate2_threshold: int
     gate2_passed: bool
     observations: int
     sessions: int
     log_likelihood: float
+    converged: bool
     seeds: int
     flags: Dict[str, str] = field(default_factory=dict)
     method: str = "GaussianHMM, diag covariance, states ordered by range volatility"
+
+    def fav(self, direction: int) -> Optional[int]:
+        """Благоприятное состояние для направления: знак дрейфа совпадает со знаком `s`."""
+        if direction not in (LONG, SHORT):
+            raise RegimeError("direction must be +1 or -1")
+        candidates = [
+            state
+            for state, drift in enumerate(self.drift)
+            if direction * drift > 0 and math.isfinite(drift)
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "observations": self.observations,
             "sessions": self.sessions,
-            "transition_counts": self.transition_counts,
+            "transitions": self.transitions,
             "gate2_threshold": self.gate2_threshold,
             "gate2": GATE2_PASSED if self.gate2_passed else GATE2_FAILED,
-            "transition": [[round(value, 6) for value in row] for row in self.transition],
+            "converged": self.converged,
+            "transition": [_finite_row(row) for row in self.transition],
             "counts": [list(row) for row in self.counts],
-            "volatility": [round(value, 8) for value in self.volatility],
-            "log_likelihood": round(self.log_likelihood, 6),
+            "drift": [_number(value) for value in self.drift],
+            "volatility": [_number(value) for value in self.volatility],
+            "fav": {
+                "long": self.fav(LONG),
+                "short": self.fav(SHORT),
+            },
+            "log_likelihood": _number(self.log_likelihood),
             "seeds": self.seeds,
             "method": self.method,
             "flags": dict(self.flags),
@@ -95,8 +122,8 @@ class Survival:
     def to_dict(self) -> Dict[str, object]:
         return {
             "state": self.state,
-            "gamma": round(self.gamma, 6),
-            "p_lcb": round(self.p_lcb, 6),
+            "gamma": _number(self.gamma),
+            "p_lcb": _number(self.p_lcb),
             "transitions_from": self.transitions_from,
             "q": self.q,
             "tau_steps": self.tau_steps,
@@ -108,37 +135,65 @@ class Survival:
 
 @dataclass(frozen=True)
 class RegimeReport:
-    """Итог режимной части: 15m-модель, выживание, согласованность 10m."""
+    """Итог режимной части: 15m-модель, выживание по направлениям, согласованность 10m."""
 
     instrument: str
-    fit: RegimeFit | None
-    survival: Survival | None
-    survival_by_state: Dict[int, Survival]
-    mtf_disagreement: float | None
-    mtf_tau_minutes: int | None
+    fit: Optional[RegimeFit]
+    survival_by_direction: Dict[int, Optional[Survival]]
+    mtf_survival: Optional[Survival]
+    tau_regime_minutes: Optional[int]
+    tau_mtf_minutes: Optional[int]
+    mtf_disagreement: Optional[float]
     gates: Dict[str, str]
+
+    @property
+    def gate_passed(self) -> Dict[int, bool]:
+        """Гейт `γ_t(fav) ≥ 1−q` по направлениям; `True`, если режим не идентифицирован."""
+        if self.fit is None or not self.fit.gate2_passed:
+            return {LONG: True, SHORT: True}
+        result: Dict[int, bool] = {}
+        for direction in (LONG, SHORT):
+            item = self.survival_by_direction.get(direction)
+            result[direction] = True if item is None else item.gate_passed
+        return result
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "instrument": self.instrument,
             "hmm": None if self.fit is None else self.fit.to_dict(),
-            "survival": None if self.survival is None else self.survival.to_dict(),
-            "survival_by_state": {
-                str(state): item.to_dict() for state, item in self.survival_by_state.items()
+            "survival": {
+                "long": _survival_dict(self.survival_by_direction.get(LONG)),
+                "short": _survival_dict(self.survival_by_direction.get(SHORT)),
             },
-            "mtf_disagreement": None
-            if self.mtf_disagreement is None
-            else round(self.mtf_disagreement, 6),
-            "mtf_tau_minutes": self.mtf_tau_minutes,
+            "mtf_survival": _survival_dict(self.mtf_survival),
+            "tau_regime_minutes": self.tau_regime_minutes,
+            "tau_mtf_minutes": self.tau_mtf_minutes,
+            "mtf_disagreement": _number(self.mtf_disagreement),
             "gates": dict(self.gates),
         }
+
+
+def _number(value: Optional[float]) -> Optional[float]:
+    if value is None or not math.isfinite(value):
+        return None
+    return round(float(value), 8)
+
+
+def _finite_row(row: Sequence[float]) -> List[Optional[float]]:
+    return [_number(float(value)) for value in row]
+
+
+def _survival_dict(item: Optional[Survival]) -> Optional[Dict[str, object]]:
+    return None if item is None else item.to_dict()
 
 
 def aggregate_minutes(arrays: SessionArrays, minutes: int) -> SessionArrays:
     """Свернуть минутные бары окна в бары по `minutes` минут.
 
     Корзины считаются от первого бара окна, а не от начала часа: окно, начавшееся не на границе
-    часа, иначе дало бы неполную первую корзину.
+    часа, иначе дало бы неполную первую корзину. Неполная корзина (в ней меньше `minutes`
+    минут) всё равно возвращается, но её длина в минутах считается по фактическим барам и
+    видна вызывающему через `bars`.
     """
     if minutes < 1:
         raise RegimeError("minutes must be at least 1")
@@ -193,6 +248,7 @@ def regime_features(arrays: Sequence[SessionArrays]) -> Tuple[np.ndarray, List[i
 
     Дисбаланс `(close − open)/(high − low)` — прокси для дисбаланса объёма: разделения на
     покупки и продажи в выгрузке нет, поэтому признак помечается `PROXY:volume-imbalance`.
+    Сессии с менее чем двумя барами пропускаются; вызывающий передаёт только пригодные.
     """
     rows: List[np.ndarray] = []
     lengths: List[int] = []
@@ -230,11 +286,11 @@ def fit_hmm(
     seeds: int = DEFAULT_SEEDS,
     seed: int = DEFAULT_SEED,
     iterations: int = DEFAULT_ITERATIONS,
-) -> Tuple[object, np.ndarray, float, Dict[int, float]]:
+) -> Tuple[object, np.ndarray, float, Dict[int, float], bool]:
     """Подогнать `GaussianHMM` с рестартами.
 
-    Возвращает модель, перестановку состояний (по волатильности), лучший likelihood и среднюю
-    волатильность по внутренним состояниям.
+    Возвращает модель, перестановку состояний (по волатильности), лучший likelihood, среднюю
+    волатильность по внутренним состояниям и признак сходимости.
     """
     from hmmlearn.hmm import GaussianHMM  # локальный импорт: тяжёлая зависимость
 
@@ -247,6 +303,7 @@ def fit_hmm(
 
     best_model = None
     best_score = -math.inf
+    converged = False
     for attempt in range(seeds):
         model = GaussianHMM(
             n_components=states,
@@ -261,6 +318,7 @@ def fit_hmm(
         score = float(model.score(features, lengths))
         if score > best_score:
             best_model, best_score = model, score
+            converged = bool(getattr(getattr(model, "monitor_", None), "converged", False))
     if best_model is None:  # pragma: no cover - недостижимо при seeds >= 1
         raise RegimeError("HMM fit produced no model")
 
@@ -273,7 +331,7 @@ def fit_hmm(
         for state in range(states)
     }
     order = np.asarray(sorted(range(states), key=mean_volatility.__getitem__), dtype=int)
-    return best_model, order, best_score, mean_volatility
+    return best_model, order, best_score, mean_volatility, converged
 
 
 def canonical_labels(labels: Sequence[int], order: np.ndarray) -> np.ndarray:
@@ -299,14 +357,21 @@ def split_by_lengths(values: Sequence[int], lengths: Sequence[int]) -> List[np.n
 def markov_counts(
     states: Sequence[int], session_of: Sequence[int], states_n: int = STATES
 ) -> Tuple[np.ndarray, int]:
-    """Счётчики переходов внутри окон: пара через закрытие не считается переходом."""
+    """Счётчики пар и число **смен** состояния внутри окон.
+
+    Возвращается `(counts, transitions)`, где `counts[i, j]` — число пар `i→j`, а `transitions`
+    — число пар с `i ≠ j` (`buy_frame.md` §16: `N_trans = #{argmax γ_t ≠ argmax γ_{t+1}}`).
+    Пара через закрытие окна не считается ни тем, ни другим.
+    """
     counts = np.zeros((states_n, states_n), dtype=int)
     transitions = 0
     for index in range(1, len(states)):
         if session_of[index] != session_of[index - 1]:
             continue
-        counts[int(states[index - 1]), int(states[index])] += 1
-        transitions += 1
+        previous, current = int(states[index - 1]), int(states[index])
+        counts[previous, current] += 1
+        if previous != current:
+            transitions += 1
     return counts, transitions
 
 
@@ -328,9 +393,9 @@ def survival(
 ) -> Survival:
     """Выживание в состоянии `state`: `γ`, нижняя граница и горизонт.
 
-    `τ_regime` — по формуле дизайна: `Δ·⌊ln((1−q)/γ)/ln P_LCB⌋`. Рядом публикуется
-    альтернатива `Δ·⌊ln(1−q)/ln P_LCB⌋` (без `γ` в числителе): формулы расходятся, и выбор между
-    ними — трактовка «горизонта удержания режима», а не арифметика.
+    `τ` — по формуле дизайна: `Δ·⌊ln((1−q)/γ)/ln P_LCB⌋`. Рядом публикуется альтернатива
+    `Δ·⌊ln(1−q)/ln P_LCB⌋` без `γ` в числителе: формулы расходятся, и выбор между ними —
+    трактовка «горизонта удержания режима», а не арифметика.
     """
     if not 0.0 < q < 1.0:
         raise RegimeError(f"q must be in (0, 1), got {q}")
@@ -365,14 +430,14 @@ def mtf_consistency(
     htf_sessions: Sequence[Tuple[np.ndarray, np.ndarray]],
     mtf_sessions: Sequence[Tuple[np.ndarray, np.ndarray]],
     *,
-    tau_minutes: int,
     limit: float = MTF_DISAGREEMENT_LIMIT,
-) -> Tuple[float | None, int]:
-    """Согласованность 10m-разметки с 15m: расхождение укорачивает горизонт вдвое.
+) -> Optional[float]:
+    """Доля 10m-баров, состояние которых не совпало с 15m-баром той же корзины.
 
-    Сопоставление идёт по времени начала корзины, а не по номеру: 15 и 10 минут не кратны,
-    и «третий 10m-бар — второй 15m-бар» было бы неверно. Порог `limit` объявлен, а не подобран.
+    Сопоставление идёт по времени начала корзины, а не по номеру: 15 и 10 минут не кратны.
     """
+    if limit <= 0:
+        raise RegimeError("limit must be positive")
     mismatch = 0
     total = 0
     for (htf_ts, htf_states), (mtf_ts, mtf_states) in zip(htf_sessions, mtf_sessions):
@@ -384,11 +449,8 @@ def mtf_consistency(
             if int(state) != int(htf_states[index[position]]):
                 mismatch += 1
     if total == 0:
-        return None, tau_minutes
-    disagreement = mismatch / total
-    if disagreement > limit:
-        return disagreement, max(0, tau_minutes // 2)
-    return disagreement, tau_minutes
+        return None
+    return mismatch / total
 
 
 def evaluate_regime(
@@ -400,24 +462,64 @@ def evaluate_regime(
     mtf_minutes: int = MTF_MINUTES,
     seeds: int = DEFAULT_SEEDS,
     seed: int = DEFAULT_SEED,
+    train_lengths: Optional[Sequence[int]] = None,
+    train_until_ts: Optional[int] = None,
 ) -> RegimeReport:
-    """Полный цикл: 15m-модель, Gate 2, выживание и согласованность 10m."""
+    """Полный цикл: 15m-модель, Gate 2, выживание по направлениям и согласованность 10m.
+
+    `train_lengths`/`train_until_ts` — обучающая часть: модель обучается только на ней, а
+    разметка применяется ко всей выборке. Без них обучение и разметка совпадают, и это видно
+    в артефакте (`in_sample`). Сессии, из которых после агрегации получается один бар,
+    отбрасываются синхронно для 15m и 10m, иначе ярлыки разъезжаются с окнами.
+    """
     if mtf_minutes > htf_minutes:
         raise RegimeError("mtf frame must not be longer than the htf frame")
-    htf_sessions = [aggregate_minutes(session, htf_minutes) for session in sessions]
-    features, lengths = regime_features(htf_sessions)
+    usable = [session for session in sessions if len(session["close"]) >= 2]
+    if not usable:
+        return _empty_report(instrument, "нет окон с двумя и более барами")
+
+    htf_pairs: List[Tuple[SessionArrays, SessionArrays]] = []
+    for session in usable:
+        aggregated = aggregate_minutes(session, htf_minutes)
+        if len(aggregated["close"]) >= 2:
+            htf_pairs.append((session, aggregated))
+    if not htf_pairs:
+        return _empty_report(instrument, "после агрегации не осталось окон с двумя барами")
+
+    features, lengths = regime_features([aggregated for _, aggregated in htf_pairs])
+    if train_until_ts is not None:
+        fit_lengths = [
+            int(np.sum(aggregated["ts"] < train_until_ts))
+            for _, aggregated in htf_pairs
+        ]
+        if sum(fit_lengths) < 20:
+            return _empty_report(instrument, "в обучающей части меньше 20 15m-баров")
+    elif train_lengths is not None:
+        fit_lengths = list(train_lengths)
+    else:
+        fit_lengths = lengths
+    if len(fit_lengths) != len(lengths) or any(
+        fit_len > length for fit_len, length in zip(fit_lengths, lengths)
+    ):
+        raise RegimeError("train lengths must not exceed the per-session lengths")
+
+    # Обучающая часть — первые `fit_len` строк каждого окна: берётся срез, а не маска,
+    # иначе hmmlearn получит несовпадающие `sum(lengths)` и число наблюдений.
+    train_rows: List[np.ndarray] = []
+    offset = 0
+    for length, fit_len in zip(lengths, fit_lengths):
+        if fit_len:
+            train_rows.append(features[offset : offset + fit_len])
+        offset += length
+    train_features = np.vstack(train_rows) if train_rows else features
+    if train_features.shape[0] != sum(fit_lengths):
+        raise RegimeError("train slice does not match the declared lengths")
     try:
-        model, order, score, mean_volatility = fit_hmm(features, lengths, seeds=seeds, seed=seed)
-    except RegimeError as exc:
-        return RegimeReport(
-            instrument=instrument,
-            fit=None,
-            survival=None,
-            survival_by_state={},
-            mtf_disagreement=None,
-            mtf_tau_minutes=None,
-            gates={"regime": f"{GATE2_FAILED}: {exc}"},
+        model, order, score, mean_volatility, converged = fit_hmm(
+            train_features, [fit_len for fit_len in fit_lengths if fit_len], seeds=seeds, seed=seed
         )
+    except RegimeError as exc:
+        return _empty_report(instrument, str(exc))
 
     labels = model.predict(features, lengths)  # type: ignore[attr-defined]
     states = tuple(int(state) for state in canonical_labels(labels, order))
@@ -427,7 +529,14 @@ def evaluate_regime(
     counts, transitions = markov_counts(states, session_of)
     threshold = GATE2_PER_PARAMETER * STATES * (STATES - 1)
 
-    flags: Dict[str, str] = {"imbalance": PROXY_IMBALANCE}
+    means = np.asarray(model.means_, dtype=float)[order]  # type: ignore[attr-defined]
+    drift = tuple(float(row[0]) for row in means)
+    flags: Dict[str, str] = {
+        "imbalance": PROXY_IMBALANCE,
+        "fit": "train" if (train_until_ts is not None or train_lengths is not None) else "in_sample",
+    }
+    if not converged:
+        flags["convergence"] = "NOT_CONVERGED"
     fit = RegimeFit(
         states=states,
         session_of=session_of,
@@ -436,27 +545,30 @@ def evaluate_regime(
             for row in canonical_transition(model.transmat_, order)  # type: ignore[attr-defined]
         ),
         counts=tuple(tuple(int(value) for value in row) for row in counts),
+        drift=drift,
         volatility=tuple(float(mean_volatility[int(state)]) for state in order),
-        transition_counts=transitions,
+        transitions=transitions,
         gate2_threshold=threshold,
         gate2_passed=transitions >= threshold,
         observations=int(features.shape[0]),
         sessions=len(lengths),
         log_likelihood=score,
+        converged=converged,
         seeds=seeds,
         flags=flags,
     )
     if not fit.gate2_passed:
         flags["regime"] = (
-            f"{GATE2_FAILED}: {transitions} переходов < {threshold}; {REFERENCE_ONLY}"
+            f"{GATE2_FAILED}: {transitions} смен < {threshold}; {REFERENCE_ONLY}"
         )
         return RegimeReport(
             instrument=instrument,
             fit=fit,
-            survival=None,
-            survival_by_state={},
+            survival_by_direction={LONG: None, SHORT: None},
+            mtf_survival=None,
+            tau_regime_minutes=None,
+            tau_mtf_minutes=None,
             mtf_disagreement=None,
-            mtf_tau_minutes=None,
             gates={"regime": flags["regime"]},
         )
 
@@ -464,50 +576,114 @@ def evaluate_regime(
         state: survival(counts, state=state, q=q, htf_minutes=htf_minutes)
         for state in range(STATES)
     }
-    worst = min(survivals.values(), key=lambda item: item.tau_minutes)
-
-    mtf_sessions = [aggregate_minutes(session, mtf_minutes) for session in sessions]
-    mtf_features, mtf_lengths = regime_features(mtf_sessions)
-    mtf_labels = model.predict(mtf_features, mtf_lengths)  # type: ignore[attr-defined]
-    htf_by_session = [
-        (session["ts"], labels)
-        for session, labels in zip(htf_sessions, split_by_lengths(states, lengths))
-        if len(session["ts"])
-    ]
-    mtf_by_session = [
-        (session["ts"], labels)
-        for session, labels in zip(
-            mtf_sessions, split_by_lengths(canonical_labels(mtf_labels, order), mtf_lengths)
-        )
-        if len(session["ts"])
-    ]
-    disagreement, mtf_tau = mtf_consistency(
-        htf_by_session, mtf_by_session, tau_minutes=worst.tau_minutes
+    survival_by_direction: Dict[int, Optional[Survival]] = {}
+    for direction in (LONG, SHORT):
+        fav = fit.fav(direction)
+        survival_by_direction[direction] = None if fav is None else survivals[fav]
+    tau_regime = _min_tau(
+        [
+            item.tau_minutes if item is not None else None
+            for item in survival_by_direction.values()
+        ]
     )
+
+    mtf_pairs: List[Tuple[SessionArrays, SessionArrays]] = []
+    for session, _ in htf_pairs:
+        aggregated = aggregate_minutes(session, mtf_minutes)
+        if len(aggregated["close"]) >= 2:
+            mtf_pairs.append((session, aggregated))
+    mtf_features, mtf_lengths = regime_features([aggregated for _, aggregated in mtf_pairs])
+    mtf_labels = model.predict(mtf_features, mtf_lengths)  # type: ignore[attr-defined]
+    mtf_canonical = canonical_labels(mtf_labels, order)
+    disagreement = mtf_consistency(
+        [
+            (aggregated["ts"], labels_part)
+            for (_, aggregated), labels_part in zip(
+                htf_pairs, split_by_lengths(states, lengths)
+            )
+        ],
+        [
+            (aggregated["ts"], labels_part)
+            for (_, aggregated), labels_part in zip(
+                mtf_pairs, split_by_lengths(mtf_canonical, mtf_lengths)
+            )
+        ],
+    )
+
+    mtf_counts, _ = markov_counts(
+        tuple(int(state) for state in mtf_canonical), _session_of(mtf_lengths)
+    )
+    # 10m-выживание считается по `fav` лонга: знак дрейфа на 10m тот же по построению.
+    mtf_state = fit.fav(LONG)
+    mtf_survival = (
+        survival(mtf_counts, state=mtf_state, q=q, htf_minutes=mtf_minutes)
+        if mtf_state is not None
+        else None
+    )
+    tau_mtf = tau_regime
+    if disagreement is not None and disagreement > MTF_DISAGREEMENT_LIMIT:
+        tau_mtf = _min_tau(
+            [tau_regime, mtf_survival.tau_minutes if mtf_survival is not None else None]
+        )
+
     gates = {
         "regime": GATE2_PASSED,
-        "survival": "PASS" if worst.gate_passed else "REGIME_CONFIDENCE",
+        "survival": "; ".join(
+            f"{'long' if direction == LONG else 'short'}:"
+            f"{'PASS' if survival_by_direction[direction] is None else ('PASS' if survival_by_direction[direction].gate_passed else 'REGIME_CONFIDENCE')}"
+            for direction in (LONG, SHORT)
+        ),
     }
     if disagreement is not None and disagreement > MTF_DISAGREEMENT_LIMIT:
-        gates["mtf"] = f"MTF_DISAGREE: {disagreement:.2%} > {MTF_DISAGREEMENT_LIMIT:.0%}"
+        gates["mtf"] = (
+            f"MTF_DISAGREE: {disagreement:.2%} > {MTF_DISAGREEMENT_LIMIT:.0%}; "
+            "τ_mtf = min(τ_regime, τ_10m)"
+        )
     return RegimeReport(
         instrument=instrument,
         fit=fit,
-        survival=worst,
-        survival_by_state=survivals,
+        survival_by_direction=survival_by_direction,
+        mtf_survival=mtf_survival,
+        tau_regime_minutes=tau_regime,
+        tau_mtf_minutes=tau_mtf,
         mtf_disagreement=disagreement,
-        mtf_tau_minutes=mtf_tau,
         gates=gates,
     )
 
 
+def _session_of(lengths: Sequence[int]) -> Tuple[int, ...]:
+    return tuple(
+        session_index for session_index, length in enumerate(lengths) for _ in range(length)
+    )
+
+
+def _min_tau(values: Sequence[Optional[int]]) -> Optional[int]:
+    present = [int(value) for value in values if value is not None]
+    return min(present) if present else None
+
+
+def _empty_report(instrument: str, reason: str) -> RegimeReport:
+    return RegimeReport(
+        instrument=instrument,
+        fit=None,
+        survival_by_direction={LONG: None, SHORT: None},
+        mtf_survival=None,
+        tau_regime_minutes=None,
+        tau_mtf_minutes=None,
+        mtf_disagreement=None,
+        gates={"regime": f"{GATE2_FAILED}: {reason}"},
+    )
+
+
 __all__ = [
+    "DEFAULT_ITERATIONS",
     "DEFAULT_SEED",
     "DEFAULT_SEEDS",
     "GATE2_FAILED",
     "GATE2_PASSED",
     "GATE2_PER_PARAMETER",
     "HTF_MINUTES",
+    "LONG",
     "MTF_DISAGREEMENT_LIMIT",
     "MTF_MINUTES",
     "PROXY_IMBALANCE",
@@ -515,6 +691,7 @@ __all__ = [
     "RegimeError",
     "RegimeFit",
     "RegimeReport",
+    "SHORT",
     "STATES",
     "Survival",
     "WILSON_Z",

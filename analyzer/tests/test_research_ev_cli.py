@@ -264,15 +264,10 @@ def test_ev_negative_bound_is_flagged_when_floor_is_weaker_than_cost(tmp_path: P
     assert "NEGATIVE_BOUND" in protocol["flags"]["sanity:TEST@TQBR"]
 
 
-def test_execute_writes_journal_and_refuses_without_tau(paths):
-    """Исполнение пишет все артефакты; без положительного EV журнал пуст, отказы с причиной."""
+def test_execute_writes_journal_and_marks_sample(paths):
+    """Исполнение пишет журнал; каждая сделка помечена train/oos, причины из таблицы §9."""
     data, theta_dir, out, registry = paths
 
-    code = main(_args(data, theta_dir, out, registry, "--bootstrap", "20")
-                + ["--regime-seeds", "2"])
-
-    assert code in (0, 1)
-    # основная подкоманда — ev; здесь проверяем, что execute даёт свои артефакты
     code = main(
         [
             "execute",
@@ -284,14 +279,27 @@ def test_execute_writes_journal_and_refuses_without_tau(paths):
             "--regime-seeds", "2",
         ]
     )
+
     assert code in (0, 1)
     trade_log = json.loads((out / "trade-log.json").read_text(encoding="utf-8"))
     no_trade = json.loads((out / "no-trade.json").read_text(encoding="utf-8"))
     triggers = json.loads((out / "exit-triggers.json").read_text(encoding="utf-8"))
-    assert trade_log["payload"]["trades"] == []
-    assert no_trade["payload"]["counts"]
+    trades = trade_log["payload"]["trades"]
+    # На синтетике оптимум часто попадает на край сетки: вход тогда запрещён, и журнал пуст.
+    # Контракт артефактов проверяется независимо от того, есть ли сделки.
+    if trades:
+        allowed = {
+            reason for spec in triggers["payload"]["triggers"] for reason in spec["reasons"]
+        }
+        assert {trade["sample"] for trade in trades} <= {"train", "oos"}
+        assert {trade["exit_reason"] for trade in trades} <= allowed
+    else:
+        assert no_trade["payload"]["counts"]
     assert len(triggers["payload"]["triggers"]) == 11
     assert triggers["payload"]["reducing"] == ["mtf_confirmation", "vol_spike"]
     assert (out / "execute.md").is_file()
     hold = json.loads((out / "hold-rule.json").read_text(encoding="utf-8"))
     assert hold["payload"]["lambda_risk"] == pytest.approx(2.0 / (2 * 2**0.5))
+    # Разбиение train/OOS объявлено и записано в артефактах.
+    star = json.loads((out / "tau-star.json").read_text(encoding="utf-8"))
+    assert star["payload"]["instruments"][0]["split"]["train_share"] == pytest.approx(0.75)

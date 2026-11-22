@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from math import isfinite, sqrt
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .first_passage import EVCurve, EVPoint
 
@@ -135,22 +135,22 @@ def select_tau(curve: EVCurve, *, waiting_bars: float, tau_cap: int) -> TauStarS
     best = max(within, key=lambda point: objective(point, waiting_bars))
     best_value = objective(best, waiting_bars)
     outside = [point for point in usable if point.tau > tau_cap]
-    beyond_cap = False
-    if outside:
-        best_outside = max(outside, key=lambda point: objective(point, waiting_bars))
-        beyond_cap = objective(best_outside, waiting_bars) > best_value
+    beyond_cap = bool(outside) and objective(
+        max(outside, key=lambda point: objective(point, waiting_bars)), waiting_bars
+    ) > best_value
 
     verdict = OK
     if beyond_cap:
         verdict = SCOPE_VIOLATION
         reasons.append(
-            f"максимум объектива достигается при τ > τ_cap={tau_cap}: "
+            f"глобальный максимум объектива достигается при τ > τ_cap={tau_cap}: "
             "требуется re-specification горизонта, а не расширение сетки"
         )
-    elif best.tau == max(grid) and max(grid) >= tau_cap:
+    elif best.tau >= tau_cap:
+        # Оптимум на самом пределе — тот же выход за скоуп, даже если сетка продолжается дальше.
         verdict = SCOPE_VIOLATION
         reasons.append(
-            f"максимум объектива на границе сетки τ={best.tau} при τ_cap={tau_cap}: "
+            f"максимум объектива на пределе τ={best.tau} при τ_cap={tau_cap}: "
             "требуется re-specification, а не продление сетки"
         )
     elif best.tau == max(grid):
@@ -161,7 +161,8 @@ def select_tau(curve: EVCurve, *, waiting_bars: float, tau_cap: int) -> TauStarS
         reasons.append(
             f"EV_LCB(τ*)={best.ev_lcb:.4f} ≤ 0: горизонт выбран, но вход запрещён"
         )
-    entry_allowed = verdict != SCOPE_VIOLATION and best.ev_lcb > 0
+    # BOUNDARY — сигнал «сетка коротка»: вход по краю сетки запрещён так же, как при скоупе.
+    entry_allowed = verdict == OK and best.ev_lcb > 0
 
     return TauStarSelection(
         tau=best.tau,
@@ -195,19 +196,6 @@ def entry_decision(
         return EntryDecision(False, selection.tau, point, "EV_LCB_NONPOSITIVE")
     return EntryDecision(True, selection.tau, point, OK)
 
-
-def ladder(
-    curve: EVCurve, *, waiting_bars: float, tau_caps: Sequence[int]
-) -> List[Dict[str, object]]:
-    """Лестница чувствительности по `τ_cap`: тот же объектив, разные пределы."""
-    rows = []
-    for cap in tau_caps:
-        selection = select_tau(curve, waiting_bars=waiting_bars, tau_cap=cap)
-        rows.append({"tau_cap": cap, **selection.to_dict()})
-    return rows
-
-
-# --- верхние границы горизонта ---------------------------------------------
 
 COMPONENT_OK = "OK"
 COMPONENT_REFERENCE = "REFERENCE_ONLY"
@@ -317,12 +305,31 @@ def tau_max_components(
             TauComponent("regime", None, regime_status, "режимная модель не дала горизонт")
         )
         reasons.append("τ_regime отсутствует: режимная модель не идентифицирована")
+    elif tau_regime <= 0:
+        components.append(
+            TauComponent(
+                "regime",
+                0,
+                COMPONENT_REFERENCE,
+                "REGIME_CONFIDENCE: γ_t(fav) < 1−q или горизонт режима равен нулю",
+            )
+        )
+        reasons.append("τ_regime = 0: режим не удерживается на шаге")
     else:
         components.append(TauComponent("regime", _round_up(tau_regime, step), COMPONENT_OK))
 
     if tau_mtf is None:
         components.append(
             TauComponent("mtf", None, regime_status, "согласованность 10m не оценена")
+        )
+    elif tau_mtf <= 0:
+        components.append(
+            TauComponent(
+                "mtf",
+                0,
+                COMPONENT_REFERENCE,
+                "MTF_DISAGREE/REGIME_CONFIDENCE: согласованность 10m не оставляет горизонта",
+            )
         )
     else:
         components.append(TauComponent("mtf", _round_up(tau_mtf, step), COMPONENT_OK))
@@ -365,7 +372,6 @@ __all__ = [
     "TauMax",
     "TauStarSelection",
     "entry_decision",
-    "ladder",
     "objective",
     "select_tau",
     "tau_max_components",

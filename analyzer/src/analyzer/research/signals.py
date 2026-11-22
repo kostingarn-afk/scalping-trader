@@ -130,14 +130,20 @@ def session_ohlcv(bars: Sequence[Bar], schedule: SessionSchedule) -> List[Sessio
 def ou_signals(
     sessions: Sequence[SessionArrays],
     *,
-    sigma_p_ticks: float,
+    sigma_p_ticks: float = 0.0,
     z_entry: float,
     tick_value: float,
+    sigma_p_log: float = 0.0,
     min_history: int = MIN_HISTORY,
 ) -> SignalSet:
-    """Сигналы против отклонения от накопленного VWAP с весом по объёму."""
-    if sigma_p_ticks <= 0:
-        raise SignalError("sigma_p_ticks must be positive")
+    """Сигналы против отклонения от накопленного VWAP с весом по объёму.
+
+    `σ_P` берётся в ценовых единицах **на каждом баре**: она стационарна в лог-масштабе, поэтому
+    `σ_P(price) = σ_P_log·price`. Константа `σ_P(тики)·tick_value` допустима, но на разбросе
+    цен окна 6–13 % смещает `Z`; при заданном `sigma_p_log` используется она.
+    """
+    if sigma_p_ticks <= 0 and sigma_p_log <= 0:
+        raise SignalError("one of sigma_p_ticks or sigma_p_log must be positive")
     if tick_value <= 0:
         raise SignalError("tick_value must be positive")
     if z_entry <= 0:
@@ -146,7 +152,7 @@ def ou_signals(
         raise SignalError("min_history must be at least 1")
 
     signals: List[Signal] = []
-    sigma_price = sigma_p_ticks * tick_value
+    sigma_price_constant = sigma_p_ticks * tick_value
     for session_index, arrays in enumerate(sessions):
         close = arrays["close"]
         if len(close) <= min_history:
@@ -157,7 +163,11 @@ def ou_signals(
         typical = (arrays["high"] + arrays["low"] + arrays["close"]) / 3.0
         anchor = np.cumsum(typical * arrays["volume"]) / weight
         for index in range(min_history, len(close)):
-            z = (float(close[index]) - float(anchor[index])) / sigma_price
+            price = float(close[index])
+            sigma_price = sigma_p_log * price if sigma_p_log > 0 else sigma_price_constant
+            if sigma_price <= 0:
+                continue
+            z = (price - float(anchor[index])) / sigma_price
             if abs(z) < z_entry:
                 continue
             signals.append(
@@ -166,7 +176,7 @@ def ou_signals(
                     index=index,
                     direction=-1 if z > 0 else 1,
                     z=z,
-                    price=float(close[index]),
+                    price=price,
                     anchor=float(anchor[index]),
                 )
             )
@@ -175,7 +185,11 @@ def ou_signals(
         sessions=len(sessions),
         z_entry=z_entry,
         sigma_p_ticks=sigma_p_ticks,
-        flags={"signal": PROVISIONAL, "series": SIGNAL_SERIES_FLAG},
+        flags={
+            "signal": PROVISIONAL,
+            "series": SIGNAL_SERIES_FLAG,
+            "sigma": "LOG_SCALED" if sigma_p_log > 0 else "CONSTANT_TICKS",
+        },
     )
 
 
