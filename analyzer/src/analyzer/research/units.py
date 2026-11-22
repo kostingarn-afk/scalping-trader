@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, Mapping, Optional, Tuple, Union
 
 TICKS = "ticks"
+TICKS_SQ = "ticks^2"
+TICKS_SQRT_MIN = "ticks/sqrt(min)"
 MINUTE_INVERSE = "min^-1"
+MINUTE_INVERSE_SQRT = "min^-1/2"
 PCT = "pct"
 RUB = "rub"
 RATIO = "ratio"
@@ -26,7 +29,10 @@ LOG_RETURNS_SQ = "log2_returns"
 ALLOWED_UNITS: frozenset[str] = frozenset(
     {
         TICKS,
+        TICKS_SQ,
+        TICKS_SQRT_MIN,
         MINUTE_INVERSE,
+        MINUTE_INVERSE_SQRT,
         PCT,
         RUB,
         RATIO,
@@ -202,11 +208,14 @@ __all__ = [
     "LOG_RETURNS_SQ",
     "MINUTES",
     "MINUTE_INVERSE",
+    "MINUTE_INVERSE_SQRT",
     "PCT",
     "Parameter",
     "RATIO",
     "RUB",
     "TICKS",
+    "TICKS_SQ",
+    "TICKS_SQRT_MIN",
     "UnitsError",
     "UnitsRegistry",
     "require_units",

@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from ..backtest.loader import HistoryDataset, scan_dir
 from .artifacts import build_artifact, collect_flags
 from .costs import CostEstimate, estimate_cost
+from .ev import entry_decision, select_tau
+from .first_passage import FirstPassageError, build_curve
 from .gate0a import (
     DEFAULT_TAUS as GATE_TAUS,
     PhiStarTable,
@@ -24,9 +26,10 @@ from .gate0a import (
 )
 from .gate0a import build_artifact as build_gate_artifact
 from .integrity import CRITICAL, IntegrityReport, check_integrity
-from .policy import load_policy
+from .policy import PolicyError, declare_barriers, load_policy
 from .registry import RegistryError, TrialRegistry
 from .sessions import SessionSchedule
+from .signals import SignalError, ou_signals, session_ohlcv
 from .ticks import TickSize, TickSizeError, describe, resolve_tick_size
 from .theta import (
     DEFAULT_BOOTSTRAP,
@@ -46,9 +49,12 @@ from .units import (
     LOG_RETURNS,
     LOG_RETURNS_SQ,
     MINUTE_INVERSE,
+    MINUTE_INVERSE_SQRT,
     MINUTES,
     RATIO,
     TICKS,
+    TICKS_SQ,
+    TICKS_SQRT_MIN,
 )
 from .variance import (
     DeseasonResult,
@@ -62,6 +68,7 @@ from .variance import (
 )
 
 DEFAULT_TAUS = (1, 3, 5, 10, 15, 30)
+DEFAULT_EV_TAUS = (1, 3, 5, 10, 15, 30, 60)
 DEFAULT_MODEL = "baseline"
 MIN_DESEASON_OBSERVATIONS = 30
 
@@ -82,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("report", "сводка: шаг цены, издержки, дисперсии, VR"),
         ("phi-star", "Gate 0a: φ*(τ) = Cost / σ_τ"),
         ("theta", "Gate 1: θ по инвариантности и OU-параметры"),
+        ("ev", "R3: вероятности касания, EV(τ), τ* и входной гейт"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("--data-dir", required=True, type=Path, help="каталог выгрузок")
@@ -166,6 +174,33 @@ def build_parser() -> argparse.ArgumentParser:
                     "в диагностическом режиме"
                 ),
             )
+        if name == "ev":
+            command.add_argument(
+                "--theta-dir",
+                type=Path,
+                default=None,
+                help="каталог артефактов Gate 1 (по умолчанию — каталог --out)",
+            )
+            command.add_argument(
+                "--taus",
+                default=",".join(str(tau) for tau in DEFAULT_EV_TAUS),
+                help="сетка τ в минутах",
+            )
+            command.add_argument(
+                "--weeks",
+                type=int,
+                default=8,
+                help="окно оценки сигналов и EV (4–8); 0 — вся история",
+            )
+            command.add_argument(
+                "--bootstrap",
+                type=int,
+                default=DEFAULT_BOOTSTRAP,
+                help="число ресамплов CI (кластеры — торговые окна)",
+            )
+            command.add_argument(
+                "--policy", type=Path, default=None, help="YAML с параметрами политики"
+            )
     return parser
 
 
@@ -191,6 +226,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_phi_star(args, datasets, schedule)
     if args.command == "theta":
         return _run_theta(args, datasets, schedule)
+    if args.command == "ev":
+        return _run_ev(args, datasets, schedule)
     return _run_report(args, datasets, schedule)
 
 
@@ -718,6 +755,468 @@ def _run_theta(
         f"({passed}/{len(entries)}); опыт: {trial.id}"
     )
     return EXIT_OK if verdict == "PASS" else EXIT_GATE
+
+
+def _run_ev(
+    args: argparse.Namespace, datasets: Sequence[HistoryDataset], schedule: SessionSchedule
+) -> int:
+    """EV-ядро R3: вероятности касания, `EV(τ)`, `τ*` и решение о входе."""
+    if args.bootstrap < 20:
+        print("ошибка ввода: --bootstrap должен быть не меньше 20", file=sys.stderr)
+        return EXIT_INPUT
+    if args.weeks != 0 and not 4 <= args.weeks <= 8:
+        print(
+            "ошибка ввода: --weeks допускает 0 (вся история) или 4–8 недель",
+            file=sys.stderr,
+        )
+        return EXIT_INPUT
+    taus = _parse_grid(args.taus)
+    if taus is None:
+        print(f"ошибка ввода: неверная сетка τ {args.taus!r}", file=sys.stderr)
+        return EXIT_INPUT
+
+    theta_dir = args.theta_dir or args.out
+    try:
+        upstream, theta_trial = _load_theta_upstream(theta_dir)
+    except (OSError, ValueError) as exc:
+        print(f"ошибка ввода: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    try:
+        policy, policy_sources = load_policy(args.policy)
+    except PolicyError as exc:
+        print(f"ошибка политики: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+
+    registry_path = args.registry or (args.out / "registry.jsonl")
+    registry = TrialRegistry(registry_path)
+    try:
+        trial = registry.register(
+            {
+                "model": "ev_tau_star",
+                "frame": f"{datasets[0].interval_minutes}min",
+                "window": _window(datasets),
+                "estimation_weeks": args.weeks,
+                "theta_trial_id": theta_trial,
+                "policy": policy.to_mapping(),
+                "policy_sources": policy_sources,
+                "taus": list(taus),
+                "bootstrap": args.bootstrap,
+                "schedule": schedule.name,
+                "protocol": "SL_FIRST_EMPIRICAL_1M",
+            }
+        )
+    except RegistryError as exc:
+        print(f"ошибка реестра: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+
+    entries: List[Dict[str, object]] = []
+    skipped: List[Dict[str, object]] = []
+    flags: Dict[str, str] = {}
+    for dataset in datasets:
+        name = dataset.instrument.name
+        try:
+            tick = _resolve_tick(dataset)
+        except TickSizeError as exc:
+            skipped.append({"instrument": name, "reason": f"TICK: {exc}"})
+            flags[f"tick:{name}"] = f"NO_TICK: {exc}"
+            continue
+
+        source = upstream.get(name)
+        if source is None:
+            skipped.append({"instrument": name, "reason": "NO_THETA_ARTIFACT"})
+            continue
+        if source.get("gate1") != "PASS":
+            reasons = source.get("reasons") or []
+            detail = f": {reasons[0]}" if reasons else ""
+            skipped.append(
+                {"instrument": name, "reason": f"GATE1:{source.get('gate1')}{detail}"}
+            )
+            continue
+
+        try:
+            bars, estimation_window = _estimation_slice(dataset, args.weeks)
+        except ThetaError as exc:
+            skipped.append({"instrument": name, "reason": f"NO_DATA: {exc}"})
+            continue
+        price = _median_price(bars)
+        sigma_ticks = float(source["sigma"]) * price / tick.value
+        sigma_p_ticks = float(source["sigma_p"]) * price / tick.value
+        try:
+            barriers = declare_barriers(sigma_ticks, policy)
+        except PolicyError as exc:
+            skipped.append({"instrument": name, "reason": f"POLICY: {exc}"})
+            continue
+        cost = estimate_cost(
+            price,
+            tick,
+            tariff=args.tariff,
+            spread_bps=args.spread_bps,
+            spread_verified=args.spread_verified,
+        )
+        sessions = session_ohlcv(bars, schedule)
+        try:
+            signals = ou_signals(
+                sessions,
+                sigma_p_ticks=sigma_p_ticks,
+                z_entry=policy.z_entry,
+                tick_value=tick.value,
+            )
+        except SignalError as exc:
+            skipped.append({"instrument": name, "reason": f"SIGNAL: {exc}"})
+            continue
+        if not signals.signals:
+            skipped.append({"instrument": name, "reason": "NO_SIGNALS"})
+            flags[f"signals:{name}"] = "NO_SIGNALS"
+            continue
+
+        try:
+            curve = build_curve(
+                sessions,
+                signals.signals,
+                tp_ticks=barriers.tp_ticks,
+                sl_ticks=barriers.sl_ticks,
+                cost_ticks=cost.round_trip_ticks,
+                tick_value=tick.value,
+                taus=taus,
+                bootstrap=args.bootstrap,
+            )
+        except FirstPassageError as exc:
+            skipped.append({"instrument": name, "reason": f"EV: {exc}"})
+            continue
+
+        selection = select_tau(
+            curve, waiting_bars=signals.waiting_bars, tau_cap=policy.tau_cap_minutes
+        )
+        # τ_max из семи компонентов — шаг R3.2; пока гейт работает по τ_cap, и это видно в флагах.
+        decision = entry_decision(curve, selection, tau_max=policy.tau_cap_minutes)
+        # §3 holding_exiting.md: EV ≤ a − Cost, поэтому a ≤ Cost исключает положительный EV
+        # при любых вероятностях. Это sanity-проверка (не гейт): она объясняет вердикт.
+        bound = barriers.tp_ticks - cost.round_trip_ticks
+
+        entries.append(
+            {
+                "instrument": name,
+                "bars": len(bars),
+                "tick_value": tick.value,
+                "tick_source": tick.source,
+                "price_reference": round(price, 6),
+                "estimation_window": estimation_window,
+                "theta_trial_id": theta_trial,
+                "theta": source.get("theta"),
+                "t_half_minutes": source.get("t_half"),
+                "sigma_log": source.get("sigma"),
+                "sigma_p_log": source.get("sigma_p"),
+                "mu_log": source.get("mu"),
+                "sigma_ticks": round(sigma_ticks, 6),
+                "sigma_p_ticks": round(sigma_p_ticks, 6),
+                "barriers": barriers.to_mapping(),
+                "cost": cost.to_dict(),
+                "sanity": {
+                    "max_ev_upper_bound": round(bound, 6),
+                    "viable": bool(bound > 0),
+                    "rule": "EV ≤ a − Cost: при a ≤ Cost положительный EV невозможен",
+                },
+                "signals": signals.to_dict(),
+                "curve_meta": {
+                    "protocol": curve.protocol,
+                    "block_rule": curve.block_rule,
+                    "bootstrap": curve.bootstrap,
+                    "min_paths": curve.min_paths,
+                    "min_cluster_bars": curve.min_cluster_bars,
+                    "taus": list(taus),
+                },
+                "points": [point.to_dict() for point in curve.points],
+                "tau_star": selection.to_dict(),
+                "entry": decision.to_dict(),
+                "tau_max": {
+                    "value": policy.tau_cap_minutes,
+                    "source": "tau_cap",
+                    "complete": False,
+                },
+            }
+        )
+
+        for key, value in cost.flags.items():
+            flags[f"cost:{name}"] = value
+        if bound <= 0:
+            flags[f"sanity:{name}"] = (
+                f"NEGATIVE_BOUND: TP={barriers.tp_ticks} тиков ≤ Cost="
+                f"{cost.round_trip_ticks:.2f} — EV > 0 невозможно при любых p"
+            )
+        flags[f"signal:{name}"] = "PROVISIONAL_SIGNAL"
+        flags[f"tau_max:{name}"] = "TAU_MAX_INCOMPLETE: только tau_cap (R3.2)"
+        flags[f"entry:{name}"] = (
+            f"ALLOWED tau={decision.tau}" if decision.allowed else f"BLOCKED {decision.reason}"
+        )
+        if selection.reasons:
+            flags[f"tau_star:{name}"] = "; ".join(selection.reasons)
+
+    allowed = sum(1 for entry in entries if entry["entry"]["allowed"])  # type: ignore[index]
+    verdict = "PASS" if allowed else "NO_ENTRY"
+    instruments_n = {str(entry["instrument"]): int(entry["bars"]) for entry in entries} or {
+        "instruments": 0
+    }
+
+    _write(
+        args.out / "first_passage-protocol.json",
+        json.dumps(
+            build_artifact(
+                name="first_passage_protocol",
+                units={
+                    "barrier_tp": TICKS,
+                    "barrier_sl": TICKS,
+                    "cost": TICKS,
+                    "sigma": TICKS_SQRT_MIN,
+                    "sigma_p": TICKS,
+                    "horizon": MINUTES,
+                },
+                n=instruments_n,
+                method=(
+                    "Эмпирические вероятности первого касания по 1m, конвенция «SL первым»; "
+                    "путь, не умещающийся в окно, отбрасывается; CI — кластерный bootstrap "
+                    "по торговым окнам (кластер ≥ 2τ баров); сверка с краевой задачей OU — "
+                    "REFERENCE_ONLY на синтетике"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial.id,
+                    "theta_trial_id": theta_trial,
+                    "policy": policy.to_mapping(),
+                    "policy_sources": policy_sources,
+                    "split_policy": "single-window; train/OOS фиксирует R4",
+                    "skipped": skipped,
+                    "instruments": [
+                        {
+                            key: entry.get(key)
+                            for key in (
+                                "instrument",
+                                "bars",
+                                "estimation_window",
+                                "tick_value",
+                                "tick_source",
+                                "price_reference",
+                                "sigma_ticks",
+                                "sigma_p_ticks",
+                                "barriers",
+                                "cost",
+                                "sanity",
+                                "signals",
+                                "curve_meta",
+                            )
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "ev-curve.json",
+        json.dumps(
+            build_artifact(
+                name="ev_curve",
+                units={
+                    "ev": TICKS,
+                    "var": TICKS_SQ,
+                    "sd": TICKS,
+                    "horizon": MINUTES,
+                },
+                n={
+                    str(entry["instrument"]): int(
+                        sum(point["paths"] for point in entry["points"])  # type: ignore[union-attr]
+                    )
+                    for entry in entries
+                }
+                or {"instruments": 0},
+                method=(
+                    "EV(τ) = a·p_TP − b·p_SL + E[ΔP|N]·p_N − Cost; V(τ) = Var(X); "
+                    "EV_LCB — 2.5-й перцентиль кластерного bootstrap"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial.id,
+                    "instruments": [
+                        {
+                            "instrument": entry["instrument"],
+                            "barriers": entry["barriers"],
+                            "cost_ticks": entry["cost"]["round_trip_ticks"],  # type: ignore[index]
+                            "points": entry["points"],
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    _write(
+        args.out / "tau-star.json",
+        json.dumps(
+            build_artifact(
+                name="tau_star_selection",
+                units={"horizon": MINUTES, "objective": MINUTE_INVERSE_SQRT},
+                n=instruments_n,
+                method=(
+                    "τ* = argmax EV(τ)/√(V(τ)(τ+w)) на τ ≤ τ_cap; вход разрешает EV_LCB(τ*); "
+                    "τ > τ_cap — SCOPE_VIOLATION, граница сетки — BOUNDARY"
+                ),
+                flags=flags,
+                payload={
+                    "trial_id": trial.id,
+                    "theta_trial_id": theta_trial,
+                    "tau_cap_minutes": policy.tau_cap_minutes,
+                    "verdict": verdict,
+                    "skipped": skipped,
+                    "instruments": [
+                        {
+                            "instrument": entry["instrument"],
+                            "tau_star": entry["tau_star"],
+                            "entry": entry["entry"],
+                            "tau_max": entry["tau_max"],
+                            "waiting_bars": entry["signals"]["waiting_bars"],  # type: ignore[index]
+                        }
+                        for entry in entries
+                    ],
+                },
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+    _write(
+        args.out / "ev.md",
+        _format_ev(entries, skipped, trial.id, verdict, args.weeks),
+    )
+    print(
+        f"отчёт сохранён: {args.out / 'ev.md'}; вердикт: {verdict} "
+        f"({allowed}/{len(entries)}); опыт: {trial.id}"
+    )
+    return EXIT_OK if verdict == "PASS" else EXIT_GATE
+
+
+def _load_theta_upstream(directory: Path) -> Tuple[Dict[str, Dict[str, object]], str]:
+    """Прочитать θ, σ, σ_P из артефактов Gate 1: без них EV не считается."""
+    theta_path = directory / "theta-invariance.json"
+    ou_path = directory / "ou-fit.json"
+    missing = [str(path) for path in (theta_path, ou_path) if not path.is_file()]
+    if missing:
+        raise ValueError(
+            f"нет артефактов Gate 1 в {directory}: {', '.join(missing)}; "
+            "укажите --theta-dir или сначала выполните подкоманду theta"
+        )
+
+    theta_artifact = json.loads(theta_path.read_text(encoding="utf-8"))
+    ou_artifact = json.loads(ou_path.read_text(encoding="utf-8"))
+    theta_payload = theta_artifact.get("payload") or {}
+    ou_payload = ou_artifact.get("payload") or {}
+    theta_trial = str(theta_payload.get("trial_id") or "")
+
+    by_name: Dict[str, Dict[str, object]] = {}
+    for entry in theta_payload.get("instruments") or []:
+        by_name[str(entry.get("instrument"))] = {
+            "gate1": entry.get("gate1"),
+            "reasons": entry.get("gate1_reasons") or [],
+            "theta": entry.get("theta_used"),
+            "t_half": entry.get("t_half_minutes"),
+        }
+    for entry in ou_payload.get("instruments") or []:
+        target = by_name.setdefault(str(entry.get("instrument")), {})
+        target.update(
+            {
+                "sigma": entry.get("sigma"),
+                "sigma_p": entry.get("sigma_p"),
+                "mu": entry.get("mu"),
+            }
+        )
+
+    for name, source in by_name.items():
+        if source.get("gate1") != "PASS":
+            continue
+        for key in ("sigma", "sigma_p"):
+            value = source.get(key)
+            if not isinstance(value, (int, float)) or not value > 0:
+                raise ValueError(f"{name}: артефакт Gate 1 не содержит положительного {key}")
+    return by_name, theta_trial
+
+
+def _median_price(bars: Sequence) -> float:
+    """Опорная цена для перевода лог-величин в тики: медиана close окна."""
+    closes = sorted(float(bar.close) for bar in bars)
+    if not closes:
+        raise ThetaError("нет баров для опорной цены")
+    return closes[len(closes) // 2]
+
+
+def _format_ev(
+    entries: Sequence[Dict[str, object]],
+    skipped: Sequence[Dict[str, object]],
+    trial_id: str,
+    verdict: str,
+    weeks: int,
+) -> str:
+    lines = ["# R3 — EV(τ), τ* и решение о входе", ""]
+    lines.append(
+        f"Опыт `{trial_id}`; вердикт `{verdict}`; окно {weeks} нед; "
+        f"протокол: SL первым (смещение EV вниз)."
+    )
+    lines.append("")
+    if entries:
+        lines.append(
+            "| Инструмент | θ, мин⁻¹ | σ_P, тики | Барьеры TP/SL | Cost "
+            "| Верх. граница EV = a−C | τ* | EV(τ*) | EV_LCB | Вход |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        for entry in entries:
+            tau_star = entry["tau_star"]
+            entry_decision_payload = entry["entry"]
+            barriers = entry["barriers"]
+            lines.append(
+                f"| {entry['instrument']} | {_fmt(entry['theta'])} | {_fmt(entry['sigma_p_ticks'])} "
+                f"| {barriers['tp_ticks']}/{barriers['sl_ticks']} "  # type: ignore[index]
+                f"| {_fmt(entry['cost']['round_trip_ticks'])} "  # type: ignore[index]
+                f"| {_fmt(entry['sanity']['max_ev_upper_bound'])} "  # type: ignore[index]
+                f"| {_fmt(tau_star['tau'])} | {_fmt(tau_star['ev'])} | {_fmt(tau_star['ev_lcb'])} "  # type: ignore[index]
+                f"| {entry_decision_payload['reason']} |"  # type: ignore[index]
+            )
+        lines.append("")
+        lines.append("EV и EV_LCB — в тиках на одну сделку после круговых издержек.")
+        lines.append("")
+        lines.append("## Причины по инструментам")
+        lines.append("")
+        for entry in entries:
+            reasons = entry["tau_star"].get("reasons") or []  # type: ignore[union-attr]
+            bound = entry["sanity"]  # type: ignore[index]
+            if not bound["viable"]:  # type: ignore[index]
+                reasons = [
+                    *reasons,
+                    (
+                        f"граница §3: TP={bound['max_ev_upper_bound'] + entry['cost']['round_trip_ticks']:.2f} "  # type: ignore[index]
+                        f"≤ Cost={entry['cost']['round_trip_ticks']:.2f} — "  # type: ignore[index]
+                        "положительный EV недостижим при любых вероятностях"
+                    ),
+                ]
+            lines.append(f"- **{entry['instrument']}**: " + ("; ".join(str(reason) for reason in reasons) or "—"))
+        lines.append("")
+    else:
+        lines.append("Ни один инструмент не доведён до EV-кривой.")
+        lines.append("")
+    if skipped:
+        lines.append("## Пропущенные")
+        lines.append("")
+        lines.append("| Инструмент | Причина |")
+        lines.append("|---|---|")
+        for item in skipped:
+            lines.append(f"| {item['instrument']} | `{item['reason']}` |")
+        lines.append("")
+    lines.append(
+        "`τ_max` посчитан только по `τ_cap`: остальные компоненты — шаг R3.2, "
+        "флаг `TAU_MAX_INCOMPLETE`."
+    )
+    return "\n".join(lines)
 
 
 def _estimation_slice(
